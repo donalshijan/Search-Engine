@@ -1,0 +1,12 @@
+[package]
+name = "search_engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+scraper = "0.12"
+serde_json = "1.0"
+regex = "1.5"
+num_cpus = "1.15"         
+core_affinity = "0.8"
+uuid = { version = "1", features = ["v4"] }

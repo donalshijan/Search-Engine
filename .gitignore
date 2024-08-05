@@ -1,0 +1,31 @@
+# Ignore the target directory
+/target/
+
+# Ignore Cargo.lock for libraries
+# Uncomment if you're working on a library
+# Cargo.lock
+
+# Ignore editor-specific files
+/.idea/
+/.vscode/
+*.rs.bk
+*.swp
+*.swo
+.DS_Store
+
+# Ignore OS-specific files
+Thumbs.db
+desktop.ini
+
+# Ignore build artifacts
+*.o
+*.d
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+
+# Ignore test/log files
+*.log
+*.prof
