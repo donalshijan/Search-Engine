@@ -1,16 +1,19 @@
+mod server;
+
 use search_engine::*;
 use std::io::{self, Write};
 use std::thread;
 use num_cpus;
 use core_affinity;
-use std::collections::VecDeque;
+use std::time::Duration;
+use tokio::time::sleep;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 enum EngineMode {
     SingleCoreSingleThread,
-    MultiCoreEachThreadSearchingAgainstWholeIndex,
-    MultiCoreEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex
+    MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex,
+    MultiCoreMultipleThreadsEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex
 }
 
 struct ThreadData {
@@ -34,13 +37,13 @@ impl Engine {
         match self.engine_mode {
             EngineMode::SingleCoreSingleThread => {
                 // Handle SingleInstanceSingleCore
-                let mut searcher = Searcher::new();
+                let mut search_library = SearchLibrary::new();
                 for doc in &documents {
-                    searcher.add_document_to_index(doc);
+                    search_library.add_document_to_index(doc);
                 }
-                process_queries(searcher);
+                process_queries(search_library);
             }
-            EngineMode::MultiCoreEachThreadSearchingAgainstWholeIndex => {
+            EngineMode::MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex => {
                 // Handle SingleInstanceEachCoreNoSharding
                 let num_cores = core_affinity::get_core_ids().unwrap().len();
                 let total_threads = num_cpus::get();
@@ -49,23 +52,23 @@ impl Engine {
                 } else {
                     1 // Default to 1 if no cores are found
                 };
-                let mut searcher =Searcher::new();
+                let mut search_library =SearchLibrary::new();
                 let cores = core_affinity::get_core_ids().unwrap();
                 let docs_clone = documents.clone();
                 for doc in docs_clone {
-                    searcher.add_document_to_index(&doc);
+                    search_library.add_document_to_index(&doc);
                 }
-                let searcher = Arc::new(Mutex::new(searcher));
+                let search_library = Arc::new(Mutex::new(search_library));
                 let mut handles = Vec::new();
                 // Spawn a thread for each core, and set its affinity
                 for (i,core_id) in cores.into_iter().enumerate() {
+                    let search_library_clone = Arc::clone(&search_library);
                     for j in 0..num_threads_per_core {
-                        let searcher_clone = Arc::clone(&searcher);
                         let thread_id = i * num_threads_per_core + j;
                         let handle = thread::spawn(move || {
                             // Pin this thread to the specific core
                             core_affinity::set_for_current(core_id);
-                            process_queries(searcher_clone);
+                            process_queries(search_library_clone);
                         });
             
                         handles.push(ThreadData { id: thread_id, handle });
@@ -79,7 +82,7 @@ impl Engine {
                     }
                 }
             }
-            EngineMode::MultiCoreEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex => {
+            EngineMode::MultiCoreMultipleThreadsEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex => {
                 // Handle SingleInstanceEachCoreSharded
                 let num_cores = core_affinity::get_core_ids().unwrap().len();
                 let total_threads = num_cpus::get();
@@ -92,19 +95,19 @@ impl Engine {
                 let mut handles = Vec::new();
                 let cores = core_affinity::get_core_ids().unwrap();
                 for (i,core_id) in cores.into_iter().enumerate() {
-                    let mut searcher = Searcher::new();
+                    let mut search_library = SearchLibrary::new();
                     let shard = &documents[i * shard_size..(i + 1) * shard_size];
                     for doc in shard {
-                        searcher.add_document_to_index(doc);
+                        search_library.add_document_to_index(doc);
                     }
-                    let searcher = Arc::new(Mutex::new(searcher));
+                    let search_library = Arc::new(Mutex::new(search_library));
                     for j in 0..num_threads_per_core {
                         let thread_id = i * num_threads_per_core + j;
-                        let searcher_clone = Arc::clone(&searcher);
+                        let search_library_clone = Arc::clone(&search_library);
                         let handle = thread::spawn(move || {
                             // Pin this thread to the specific core
                             core_affinity::set_for_current(core_id);
-                            process_queries(searcher_clone);
+                            process_queries(search_library_clone);
                         });
             
                         handles.push(ThreadData { id: thread_id, handle });
@@ -122,39 +125,8 @@ impl Engine {
     }
 }
 
-struct QueryQueue {
-    queue: Arc<Mutex<VecDeque<Query>>>,
-}
-
-impl QueryQueue {
-    // Create a new empty queue
-    fn new() -> Self {
-        QueryQueue {
-            queue: Arc::new(Mutex::new(VecDeque::new())),
-        }
-    }
-
-    // Add a new query to the queue
-    fn enqueue(&self, query: Query) {
-        let mut queue = self.queue.lock().unwrap();
-        queue.push_back(query);
-    }
-
-    // Remove and return a query from the queue
-    fn dequeue(&self) -> Option<Query> {
-        let mut queue = self.queue.lock().unwrap();
-        queue.pop_front()
-    }
-
-    // Check the current size of the queue
-    fn size(&self) -> usize {
-        let queue = self.queue.lock().unwrap();
-        queue.len()
-    }
-}
-
 // Function to listen for user queries and add them to the queue
-fn listen_for_user_queries(queue: Arc<QueryQueue>) {
+async fn listen_for_user_queries(queue: Arc<QueryQueue>,query_results: Arc<QueryResults>) {
     loop {
         // Prompt the user
         print!("Enter your query: ");
@@ -172,13 +144,26 @@ fn listen_for_user_queries(queue: Arc<QueryQueue>) {
         let unique_id = Uuid::new_v4().to_string();
 
         // Create a new Query object
-        let query = Query::new(
-                    &unique_id,
-                    &input,
-                );
+        let query = Query::new(&unique_id, &input);
 
         // Enqueue the query
         queue.enqueue(query);
+
+        // Poll for the result
+        loop {
+            let result = query_results.get_query_result(&unique_id);
+            match result {
+                Some(result) => {
+                    println!("Query result: {}", result);
+                    break; // Exit the polling loop if result is obtained
+                }
+                None => {
+                    println!("No result yet, checking again...");
+                    // Wait for a short period before polling again
+                    sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
     }
 }
 
@@ -191,11 +176,20 @@ fn main() {
     // Create a new query queue
     let query_queue = Arc::new(QueryQueue::new());
 
+    let query_results = Arc::new(QueryResults::new());
     // Run the listen_for_user_queries function on a separate thread
     let queue_clone = Arc::clone(&query_queue);
+    let query_results_clone = Arc::clone(&query_results);
     thread::spawn(move || {
-        listen_for_user_queries(queue_clone);
+        listen_for_user_queries(queue_clone,query_results_clone);
     });
+
+     // Start the async server
+     let server_queue = Arc::clone(&query_queue);
+     let server_query_results_clone = Arc::clone(&query_results);
+     thread::spawn(move || {
+         tokio::runtime::Runtime::new().unwrap().block_on(server::run_server(server_queue,server_query_results_clone)).unwrap();
+     });
 
     let mode = EngineMode::SingleCoreSingleThread; // Set the desired mode here
     let engine= Engine::new(mode);
