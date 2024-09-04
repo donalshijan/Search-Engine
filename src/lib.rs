@@ -25,6 +25,7 @@ pub struct Document {
     pub id: String,
     pub content: DocumentFormat,
 }
+#[derive(Debug, Clone)]
 pub struct Query {
     pub id: String,
     pub query_string : String,
@@ -36,7 +37,7 @@ pub struct Query {
 pub struct QueryResult {
     pub query_id: String,
     pub query_string : String,
-    pub documents: Vec<(String, f32)>,
+    pub documents: Vec<(String, i32)>,
     pub query_processing_time: SystemTime,
 }
 
@@ -134,17 +135,18 @@ impl Query {
     pub fn new(id: &str, query_string: &str) -> Self {
         Self {
             id: id.to_string(),
-            query_string: query_string.to_string(),
+            query_string: String::from(query_string),
             tokens: Vec::new(),
             query_arrival_time: UNIX_EPOCH,
         }
     }
     
-    pub fn tokenize_query(&mut self) {
+    pub fn tokenize_query(&mut self) -> Vec<String>{
         let re = Regex::new(r"\w+").unwrap(); // Matches words
         self.tokens = re.find_iter(&self.query_string)
             .map(|mat| mat.as_str().to_lowercase())
             .collect();
+        self.tokens.clone()
     }
 
     pub fn process_query(&self, index: &HashMap<String, Vec<String>>) -> Vec<String> {
@@ -169,13 +171,36 @@ impl Query {
 
 impl QueryResult {
     // Constructor
-    pub fn new(query_id: String, query_string: String) -> Self {
+    pub fn new(query_id: String, query_string: String,documents:Vec<(String,i32)>,query_processing_time:SystemTime) -> Self {
         QueryResult {
             query_id,
             query_string,
-            documents: Vec::new(),
-            query_processing_time: UNIX_EPOCH, 
+            documents,
+            query_processing_time, 
         }
+    }
+    pub fn aggregate_result(&mut self,new_result:QueryResult)-> & mut QueryResult{
+        // Check if self.query_id is the dummy value
+    if self.query_id.is_empty() {
+        // Copy the entire new_result to self
+        self.query_id = new_result.query_id;
+        self.query_string = new_result.query_string;
+        self.documents = new_result.documents;
+        self.query_processing_time = new_result.query_processing_time;
+    } else if self.query_id != new_result.query_id {
+        // If query_id doesn't match, return early
+        return self;
+    } else {
+        // If query_id matches, aggregate the results
+        for document in new_result.documents {
+            self.documents.push(document);
+        }
+        // Sort documents by frequency in descending order
+        self.documents.sort_by(|a, b| b.1.cmp(&a.1));
+        self.query_processing_time = std::cmp::max(self.query_processing_time, new_result.query_processing_time);
+    }
+    
+    self
     }
 }
 
@@ -322,5 +347,24 @@ impl SearchLibrary {
     pub fn get_document_by_id( doc_id: &str) -> Option<Document> {
         let documents = DOCUMENTS.lock().unwrap();
         documents.get(doc_id).cloned()
+    }
+
+    pub fn search(&self,query:& Query)-> QueryResult{
+        let mut query = query.clone();
+        let tokens:Vec<String>=query.tokenize_query();
+        let mut result_docs = HashMap::new();
+        for token in tokens {
+            if let Some(docs) = self.index.get(&token) {
+                for doc_id in docs {
+                    *result_docs.entry(doc_id.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Sort documents by relevance (frequency of matching tokens)
+        let mut sorted_docs: Vec<_> = result_docs.into_iter().collect();
+        sorted_docs.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency descending
+        let current_time = SystemTime::now();
+        QueryResult::new(query.clone().id,query.clone().query_string,sorted_docs,current_time)
     }
 }
