@@ -4,13 +4,12 @@ mod processor;
 use processor::Processor;
 use search_engine::*;
 use std::io::{self, Write};
-use std::thread;
+use std::thread::{self, ThreadId};
 use num_cpus;
 use core_affinity;
-use std::time::Duration;
-use tokio::time::sleep;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use uuid::Uuid;
+use crossbeam::channel;
 
 
 
@@ -21,8 +20,8 @@ enum EngineMode {
 }
 
 struct ThreadData {
-    id: usize,
-    handle: thread::JoinHandle<()>,
+    thread_number: usize,
+    handle: thread::JoinHandle<ThreadId>,
 }
 
 
@@ -37,7 +36,7 @@ impl Engine {
     }
 
     // Start the engine based on the engine mode
-    pub fn start_engine(&self,documents: Vec<Document>,query_queue: Arc<QueryQueue>,query_results: Arc<QueryResults>) {
+    pub fn start_engine(&self,documents: Vec<Document>,query_rx: channel::Receiver<Query> ,query_results: Arc<QueryResults>) {
         match self.engine_mode {
             EngineMode::SingleCoreSingleThread => {
                 // Handle SingleInstanceSingleCore
@@ -45,15 +44,17 @@ impl Engine {
                 for doc in &documents {
                     search_library.add_document_to_index(doc);
                 }
-                let search_library = Arc::new(Mutex::new(search_library));
+                let search_library = Arc::new(RwLock::new(search_library));
                 let cores = core_affinity::get_core_ids().unwrap();
 
                 let handle = thread::spawn(move || {
                     // Pin this thread to the specific core
                     core_affinity::set_for_current(cores[0]);
                     let thread_id = thread::current().id();
-                    let processor = Processor::new(search_library,cores[0],thread_id,query_queue,query_results);
+                    let processor = Processor::new(search_library,cores[0],thread_id,query_rx,query_results);
+                    let processor=processor.store_in_global();
                     processor.process_queries();
+                    thread_id
                 });  
                 match handle.join() {
                     Ok(_) => println!("Thread completed successfully."),
@@ -75,31 +76,34 @@ impl Engine {
                 for doc in docs_clone {
                     search_library.add_document_to_index(&doc);
                 }
-                let search_library = Arc::new(Mutex::new(search_library));
+                let search_library = Arc::new(RwLock::new(search_library));
                 let mut handles: Vec<ThreadData> = Vec::new();
                 // Spawn a thread for each core, and set its affinity
                 for (i,core_id) in cores.into_iter().enumerate() {
                     for j in 0..num_threads_per_core {
-                        let thread_id = i * num_threads_per_core + j;
-                        let query_queue_clone = Arc::clone(&query_queue);
+                        let thread_number = i * num_threads_per_core + j+1;
+                        // let query_queue_clone = Arc::clone(&query_queue);
+                        let query_rx_clone = query_rx.clone();
                         let query_results_clone = Arc::clone(&query_results);
                         let search_library_clone = Arc::clone(&search_library);
                         let handle = thread::spawn(move || {
                             // Pin this thread to the specific core
                             core_affinity::set_for_current(core_id);
                             let thread_id = thread::current().id();
-                            let processor = Processor::new(search_library_clone,core_id,thread_id,query_queue_clone,query_results_clone);
+                            let processor = Processor::new(search_library_clone,core_id,thread_id,query_rx_clone,query_results_clone);
+                            let processor=processor.store_in_global();
                             processor.process_queries();
+                            thread_id
                         });
             
-                        handles.push(ThreadData { id: thread_id, handle });
+                        handles.push(ThreadData { thread_number, handle });
                     }
                 }
                 // Join all threads
                 for thread_data in handles {
                     match thread_data.handle.join() {
-                        Ok(_) => println!("Thread ID {} completed successfully.", thread_data.id),
-                        Err(e) => eprintln!("Thread ID {} panicked: {:?}", thread_data.id, e),
+                        Ok(_) => println!("Thread no. {} completed successfully.", thread_data.thread_number),
+                        Err(e) => eprintln!("Thread no. {} panicked: {:?}", thread_data.thread_number, e),
                     }
                 }
             }
@@ -111,9 +115,10 @@ impl Engine {
                 for doc in docs_clone {
                     search_library.add_document_to_index(&doc);
                 }
-                let search_library = Arc::new(Mutex::new(search_library));
+                let search_library = Arc::new(RwLock::new(search_library));
                 for (i,core_id) in cores.iter().enumerate(){
-                    let query_queue_clone = Arc::clone(&query_queue);
+                    let thread_number = i+1;
+                    let query_rx_clone = query_rx.clone();
                     let query_results_clone = Arc::clone(&query_results);
                     let search_library_clone = Arc::clone(&search_library);
                     let core_id = *core_id;
@@ -121,11 +126,13 @@ impl Engine {
                         // Pin this thread to the specific core
                         core_affinity::set_for_current(core_id);
                         let thread_id = thread::current().id();
-                        let processor = Processor::new(search_library_clone,core_id,thread_id,query_queue_clone,query_results_clone);
+                        let processor = Processor::new(search_library_clone,core_id,thread_id,query_rx_clone,query_results_clone);
+                        let processor=processor.store_in_global();
                         processor.process_each_query_across_all_threads_in_a_core();
+                        thread_id
                     });
         
-                    handles.push(ThreadData { id: i, handle });
+                    handles.push(ThreadData { thread_number, handle });
 
                 }
 
@@ -167,8 +174,8 @@ impl Engine {
                 // Join all threads
                 for thread_data in handles {
                     match thread_data.handle.join() {
-                        Ok(_) => println!("Thread ID {} completed successfully.", thread_data.id),
-                        Err(e) => eprintln!("Thread ID {} panicked: {:?}", thread_data.id, e),
+                        Ok(_) => println!("Thread number {} completed successfully.", thread_data.thread_number),
+                        Err(e) => eprintln!("Thread ID {} panicked: {:?}", thread_data.thread_number, e),
                     }
                 }
             }
@@ -177,7 +184,7 @@ impl Engine {
 }
 
 // Function to listen for user queries and add them to the queue
-async fn listen_for_user_queries(queue: Arc<QueryQueue>,query_results: Arc<QueryResults>) {
+fn listen_for_user_queries(query_tx: channel::Sender<Query>,query_results: Arc<QueryResults>) {
     loop {
         // Prompt the user
         print!("Enter your query: ");
@@ -198,8 +205,8 @@ async fn listen_for_user_queries(queue: Arc<QueryQueue>,query_results: Arc<Query
         let query = Query::new(&unique_id, &input);
 
         // Enqueue the query
-        queue.enqueue(query);
-
+        query_tx.send(query).unwrap();
+        
         // Poll for the result
         loop {
             let result = query_results.get_query_result(&unique_id);
@@ -211,7 +218,6 @@ async fn listen_for_user_queries(queue: Arc<QueryQueue>,query_results: Arc<Query
                 None => {
                     println!("No result yet, checking again...");
                     // Wait for a short period before polling again
-                    sleep(Duration::from_secs(1)).await;
                 }
             }
         }
@@ -225,20 +231,20 @@ fn main() {
     let documents = vec![doc1, doc2];
 
     // Create a new query queue
-    let query_queue = Arc::new(QueryQueue::new());
-
+    let (query_tx, query_rx): (channel::Sender<Query>, channel::Receiver<Query>) = channel::unbounded();
+    let query_rx_clone: channel::Receiver<Query> = query_rx.clone();
     let query_results = Arc::new(QueryResults::new());
     // Run the listen_for_user_queries function on a separate thread
-    let queue_clone = Arc::clone(&query_queue);
+    let query_tx_clone: channel::Sender<Query> = query_tx.clone();
     let query_results_clone = Arc::clone(&query_results);
     thread::spawn(move || {
-        listen_for_user_queries(queue_clone,query_results_clone);
+        listen_for_user_queries(query_tx_clone,query_results_clone);
     });
 
      // Start the async server
-     let server_queue = Arc::clone(&query_queue);
+     let server_query_tx_clone: channel::Sender<Query> = query_tx.clone();
      thread::spawn(move || {
-         tokio::runtime::Runtime::new().unwrap().block_on(server::run_query_requests_server(server_queue)).unwrap();
+         tokio::runtime::Runtime::new().unwrap().block_on(server::run_query_requests_server(server_query_tx_clone)).unwrap();
      });
      let server_query_results_clone = Arc::clone(&query_results);
      thread::spawn(move || {
@@ -247,9 +253,8 @@ fn main() {
 
     let mode = EngineMode::SingleCoreSingleThread; // Set the desired mode here
     let engine= Engine::new(mode);
-    let queue_clone = Arc::clone(&query_queue);
     let query_results_clone = Arc::clone(&query_results);
-    engine.start_engine(documents,queue_clone,query_results_clone);
+    engine.start_engine(documents,query_rx_clone,query_results_clone);
     // The main thread can do other tasks, or join the spawned thread if necessary
     loop {
         // Here you might process queries, or just keep the main thread alive

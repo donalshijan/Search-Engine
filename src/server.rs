@@ -3,6 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::Arc;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
+use crossbeam::channel;
 use search_engine::*;
 
 #[derive(Serialize, Deserialize)]
@@ -26,11 +27,11 @@ struct QueryResultResponse {
     message: String,
 }
 
-pub async fn run_query_requests_server(query_queue: Arc<QueryQueue>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_query_requests_server(query_tx: channel::Sender<Query>) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
     loop {
         let (mut socket, _) = listener.accept().await?;
-        let queue_clone = Arc::clone(&query_queue);
+        let query_tx_clone = query_tx.clone();
         tokio::spawn(async move {
             let mut buffer = [0u8; 1024];
 
@@ -40,7 +41,7 @@ pub async fn run_query_requests_server(query_queue: Arc<QueryQueue>) -> Result<(
             let unique_id = Uuid::new_v4().to_string();
             let query = Query::new(&unique_id, &request.query);
 
-            queue_clone.enqueue(query);
+            query_tx_clone.send(query).unwrap();
 
             // Create the response
             let response = QueryRequestResponse {
