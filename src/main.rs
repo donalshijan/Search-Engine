@@ -20,7 +20,7 @@ enum EngineMode {
 }
 
 struct ThreadData {
-    thread_number: usize,
+    processor_id: usize,
     handle: thread::JoinHandle<ThreadId>,
 }
 
@@ -51,14 +51,14 @@ impl Engine {
                     // Pin this thread to the specific core
                     core_affinity::set_for_current(cores[0]);
                     let thread_id = thread::current().id();
-                    let processor = Processor::new(search_library,cores[0],thread_id,query_rx,query_results);
+                    let processor = Processor::new(1,search_library,Arc::new(RwLock::new(vec![cores[0]])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
                     let processor=processor.store_in_global();
                     processor.process_queries();
                     thread_id
                 });  
                 match handle.join() {
-                    Ok(_) => println!("Thread completed successfully."),
-                    Err(e) => eprintln!("Thread panicked: {:?}", e),
+                    Ok(_) => println!("Processor Terminated."),
+                    Err(e) => eprintln!("Processor thread panicked: {:?}", e),
                 }
             }
             EngineMode::MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex => {
@@ -81,7 +81,7 @@ impl Engine {
                 // Spawn a thread for each core, and set its affinity
                 for (i,core_id) in cores.into_iter().enumerate() {
                     for j in 0..num_threads_per_core {
-                        let thread_number = i * num_threads_per_core + j+1;
+                        let processor_id = i * num_threads_per_core + j+1;
                         // let query_queue_clone = Arc::clone(&query_queue);
                         let query_rx_clone = query_rx.clone();
                         let query_results_clone = Arc::clone(&query_results);
@@ -90,20 +90,20 @@ impl Engine {
                             // Pin this thread to the specific core
                             core_affinity::set_for_current(core_id);
                             let thread_id = thread::current().id();
-                            let processor = Processor::new(search_library_clone,core_id,thread_id,query_rx_clone,query_results_clone);
+                            let processor = Processor::new(processor_id,search_library_clone,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx_clone,query_results_clone);
                             let processor=processor.store_in_global();
                             processor.process_queries();
                             thread_id
                         });
             
-                        handles.push(ThreadData { thread_number, handle });
+                        handles.push(ThreadData { processor_id, handle });
                     }
                 }
                 // Join all threads
                 for thread_data in handles {
                     match thread_data.handle.join() {
-                        Ok(_) => println!("Thread no. {} completed successfully.", thread_data.thread_number),
-                        Err(e) => eprintln!("Thread no. {} panicked: {:?}", thread_data.thread_number, e),
+                        Ok(_) => println!("Processor no. {} Terminated", thread_data.processor_id),
+                        Err(e) => eprintln!("Processor no. {}'s running Thread panicked: {:?}", thread_data.processor_id, e),
                     }
                 }
             }
@@ -117,7 +117,7 @@ impl Engine {
                 }
                 let search_library = Arc::new(RwLock::new(search_library));
                 for (i,core_id) in cores.iter().enumerate(){
-                    let thread_number = i+1;
+                    let processor_id = i+1;
                     let query_rx_clone = query_rx.clone();
                     let query_results_clone = Arc::clone(&query_results);
                     let search_library_clone = Arc::clone(&search_library);
@@ -126,13 +126,13 @@ impl Engine {
                         // Pin this thread to the specific core
                         core_affinity::set_for_current(core_id);
                         let thread_id = thread::current().id();
-                        let processor = Processor::new(search_library_clone,core_id,thread_id,query_rx_clone,query_results_clone);
+                        let processor = Processor::new(processor_id,search_library_clone,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx_clone,query_results_clone);
                         let processor=processor.store_in_global();
                         processor.process_each_query_across_all_threads_in_a_core();
                         thread_id
                     });
         
-                    handles.push(ThreadData { thread_number, handle });
+                    handles.push(ThreadData { processor_id, handle });
 
                 }
 
@@ -174,8 +174,8 @@ impl Engine {
                 // Join all threads
                 for thread_data in handles {
                     match thread_data.handle.join() {
-                        Ok(_) => println!("Thread number {} completed successfully.", thread_data.thread_number),
-                        Err(e) => eprintln!("Thread ID {} panicked: {:?}", thread_data.thread_number, e),
+                        Ok(_) => println!("Processor no. {} Terminated", thread_data.processor_id),
+                        Err(e) => eprintln!("Processor no. {}'s running Thread panicked: {:?}", thread_data.processor_id, e),
                     }
                 }
             }

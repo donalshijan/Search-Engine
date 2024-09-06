@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use std::fmt;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use lazy_static::lazy_static;
 
 
@@ -38,7 +38,7 @@ pub struct QueryResult {
     pub query_id: String,
     pub query_string : String,
     pub documents: Vec<(String, i32)>,
-    pub query_processing_time: SystemTime,
+    pub query_processing_time: Duration,
 }
 
 
@@ -171,7 +171,7 @@ impl Query {
 
 impl QueryResult {
     // Constructor
-    pub fn new(query_id: String, query_string: String,documents:Vec<(String,i32)>,query_processing_time:SystemTime) -> Self {
+    pub fn new(query_id: String, query_string: String,documents:Vec<(String,i32)>,query_processing_time:Duration) -> Self {
         QueryResult {
             query_id,
             query_string,
@@ -365,6 +365,9 @@ impl SearchLibrary {
         let mut sorted_docs: Vec<_> = result_docs.into_iter().collect();
         sorted_docs.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency descending
         let current_time = SystemTime::now();
-        QueryResult::new(query.clone().id,query.clone().query_string,sorted_docs,current_time)
+        let duration_since_query_arrival = current_time
+            .duration_since(query.query_arrival_time)
+            .unwrap_or_else(|_| Duration::from_secs(0));
+        QueryResult::new(query.clone().id,query.clone().query_string,sorted_docs,duration_since_query_arrival)
     }
 }
