@@ -1,3 +1,5 @@
+use std::fs::{File, OpenOptions};
+use std::io::BufReader;
 use std::{collections::HashMap, vec};
 use regex::Regex;
 use scraper::{Html, Selector};
@@ -7,7 +9,10 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use lazy_static::lazy_static;
-
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::io::BufRead;
+use tokio::net::TcpStream;
+use std::io::Write;
 
 lazy_static! {
     static ref DOCUMENTS: Mutex<HashMap<String, Document>> = Mutex::new(HashMap::new());
@@ -370,4 +375,71 @@ impl SearchLibrary {
             .unwrap_or_else(|_| Duration::from_secs(0));
         QueryResult::new(query.clone().id,query.clone().query_string,sorted_docs,duration_since_query_arrival)
     }
+}
+
+pub async  fn test_query_performance() -> Result<(), Box<dyn std::error::Error>> {
+    // Open the queries.txt file
+    let file = File::open("queries.txt")?;
+    let reader = BufReader::new(file);
+    
+    let mut query_ids = VecDeque::new(); // To store query IDs
+    let mut total_processing_time = 0.0;
+    let mut query_count = 0;
+
+    // Loop to send each query
+    for line in reader.lines() {
+        let query = line?;
+
+        // Create a TcpStream to connect to the query server (sending query)
+        let mut stream = TcpStream::connect("127.0.0.1:8080").await?;
+        
+        // Send the query directly
+        stream.write_all(query.as_bytes()).await?;
+        
+        // Read the response
+        let mut buffer = [0u8; 1024];
+        let n = stream.read(&mut buffer).await?;
+        let response_json = &buffer[..n];
+        
+        // Deserialize the response to extract `query_id`
+        let response_value: Value = serde_json::from_slice(response_json)?;
+        if let Some(query_id) = response_value["query_id"].as_str() {
+            query_ids.push_back(query_id.to_string());
+        }
+
+        query_count += 1;
+    }
+    
+    // Loop to get the results for each query
+    while let Some(query_id) = query_ids.pop_front() {
+        // Create a TcpStream to connect to the results server (fetching result)
+        let mut stream = TcpStream::connect("127.0.0.1:8081").await?;
+        
+        // Create a request with the query_id and send it
+        let request = serde_json::json!({ "query_id": query_id });
+        stream.write_all(request.to_string().as_bytes()).await?;
+        
+        // Read the response
+        let mut buffer = [0u8; 1024];
+        let n = stream.read(&mut buffer).await?;
+        let response_json = &buffer[..n];
+        
+        // Deserialize the response to extract `query_processing_time`
+        let response_value: Value = serde_json::from_slice(response_json)?;
+        if let Some(processing_time) = response_value["query_processing_time"].as_f64() {
+            total_processing_time += processing_time;
+        }
+    }
+    
+    // Calculate the average processing time
+    let average_processing_time = total_processing_time / query_count as f64;
+    
+    // Write the result to result.txt
+    let mut result_file = OpenOptions::new()
+    .append(true)  // Open in append mode
+    .create(true)  // Create the file if it doesn't exist
+    .open("result.txt")?;
+    writeln!(result_file, "Average query processing time: {}", average_processing_time)?;
+
+    Ok(())
 }

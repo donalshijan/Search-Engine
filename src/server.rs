@@ -1,6 +1,7 @@
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
 use crossbeam::channel;
@@ -25,6 +26,7 @@ struct QueryResultRequest {
 #[derive(Serialize)]
 struct QueryResultResponse {
     message: String,
+    query_processing_time: Duration,
 }
 
 pub async fn run_query_requests_server(query_tx: channel::Sender<Query>) -> Result<(), Box<dyn std::error::Error>> {
@@ -72,18 +74,29 @@ pub async fn run_get_results_server(query_results: Arc<QueryResults>) -> Result<
 
             // Get the query result
             let result = query_results_clone.get_query_result(&request.query_id);
-            let response_message = match result {
-                Some(result) => {
-                    format!("Query result: {}", result)
+            let result_clone = result.clone();
+            let response_message = match result_clone {
+                Some(result_clone) => {
+                    format!("Query result: {}", result_clone)
                 }
                 None => {
                     String::from("No result yet, check again...")
+                }
+            };
+            
+            let query_processing_time = match result{
+                Some(result)=>{
+                    result.query_processing_time
+                }
+                None =>{
+                    Duration::ZERO
                 }
             };
 
             // Create the response
             let response = QueryResultResponse {
                 message: response_message,
+                query_processing_time: query_processing_time,
             };
 
             // Serialize the response to JSON

@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Barrier, Condvar, Mutex, RwLock};
+use std::sync::mpsc::Sender;
+use std::sync::{mpsc, Barrier, Condvar, Mutex, RwLock};
 use std::{sync::Arc, thread::ThreadId};
 use std::time::{Duration, Instant};
-use std::thread::{self, JoinHandle, Thread};
+use std::thread::{self};
 use core_affinity::CoreId;
 use prettytable::{Cell, Row, Table};
 use search_engine::{Query,  QueryResult, QueryResults, SearchLibrary};
 use lazy_static::lazy_static;
-use std::time::UNIX_EPOCH;
 use crossbeam::channel;
 
 
@@ -18,11 +18,15 @@ use crossbeam::channel;
 // }
 
 lazy_static! {
-    static ref MONITOR: Arc<Mutex<Monitor>> = Arc::new(Mutex::new(Monitor {
+    pub static ref MONITOR: Arc<Mutex<Monitor>> = Arc::new(Mutex::new(Monitor {
         processors: Vec::new(),
     }));
 }
 
+struct ThreadData {
+    thread_id: usize,
+    handle: thread::JoinHandle<ThreadId>,
+}
 
 #[derive(Clone)]
 pub struct Processor{
@@ -135,11 +139,12 @@ impl Processor{
         let search_library = self.search_library.clone();
         let query_results = self.query_results.clone();
         let thread_ids: Vec<ThreadId> = Vec::new();
+        let mut handles: Vec<ThreadData>=Vec::new();
         panic::set_hook(Box::new(|panic_info| {
             eprintln!("Thread panicked: {:?}", panic_info);
             // Additional logging or cleanup can be done here
         }));
-        for _ in 0..num_threads_per_core {
+        for i in 0..num_threads_per_core {
             let result_store_clone = Arc::clone(&result_store);
             let current_item_clone = Arc::clone(&current_item);
             let search_library_clone = search_library.clone();
@@ -149,7 +154,7 @@ impl Processor{
             let  last_heartbeat = self.last_heartbeat.clone();
             let  is_alive = self.is_alive.clone();
             core_affinity::set_for_current(self.core_ids.read().unwrap()[0]);
-            thread::spawn(move || {
+            let handle = thread::spawn(move || {
                 thread_ids.push(thread::current().id());
                 loop {
                     let result = panic::catch_unwind(|| {
@@ -202,8 +207,33 @@ impl Processor{
                         }
                     }
                 }
+                return thread::current().id()
             });
+            // handles.push(ThreadData{thread_id:thread_ids[thread_ids.len()],handle});
+            handles.push(ThreadData{thread_id:i+1,handle});
         }
+        // Join all threads
+        let (tx, rx) = mpsc::channel();
+
+        // Spawn a monitor thread
+        // let handles_monitor = handles.clone(); 
+        let tx_monitor = tx.clone();
+        thread::spawn(move || {
+            for thread_data in handles {
+                match thread_data.handle.join() {
+                    Ok(_) => {println!("Sub Thread no. {} of processor Terminated", thread_data.thread_id);
+                    let message = format!("Sub thread no. {} terminated", thread_data.thread_id);
+                    tx_monitor.send(message).unwrap();
+                    }
+                    Err(e) => {
+                        let panic_info = format!("{:?}", e);
+                        eprintln!("Sub Thread no. {} of Processor panicked: {}", thread_data.thread_id, panic_info);
+                        let message = format!("Sub thread no. {} panicked: {}", thread_data.thread_id, panic_info);
+                        tx_monitor.send(message).unwrap();
+                    }
+                }
+            }
+        });
         //main thread which pulls one request from the query queue and passes it to each thread to process in parallel
         let query_rx_clone =  self.query_rx.clone();
         let  last_heartbeat = self.last_heartbeat.clone();
@@ -238,6 +268,9 @@ impl Processor{
             match result {
                 Ok(_) => continue, // Keep processing queries
                 Err(err) => {
+                    for msg in rx {
+                        println!("Main thread received Message: {}", msg);
+                    }
                     // Downcast the error to the type you're expecting
                     if let Some(err_str) = err.downcast_ref::<String>() {
                         if err_str == "Processor stopped" {
@@ -290,10 +323,6 @@ impl Monitor {
     pub fn add_processor(&mut self, processor: Arc<Processor>) {
         self.processors.push(processor);
     }
-
-    pub fn remove_processor(&mut self, id: usize) {
-        // Logic to remove processor by id or other criteria
-    }
     
     pub fn kill_processor(&self, processor_id: usize) {
         // Iterate over all processors and kill the one with the matching ID
@@ -305,6 +334,24 @@ impl Monitor {
                 // Wait a moment to ensure the processor stops
                 thread::sleep(Duration::from_millis(100));
             }
+        }
+    }
+
+    pub fn shutdown_all_processors(&self,tx: Sender<String>) {
+        // Clone the processors Arc to avoid holding the lock longer than necessary
+        let processors = self.processors.clone();
+    
+        // Iterate over all processors and set is_alive to false
+        for processor in processors.iter() {
+            processor.is_alive.store(false, Ordering::SeqCst);
+        }
+    
+        // Wait a moment to ensure all processors stop
+        thread::sleep(Duration::from_millis(100));
+
+        // Send a message through the transmitter to notify the main thread
+        if let Err(e) = tx.send("All processors have been shut down.".to_string()) {
+            eprintln!("Failed to send shutdown notification: {}", e);
         }
     }
 

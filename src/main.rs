@@ -3,13 +3,19 @@ mod processor;
 
 use processor::Processor;
 use search_engine::*;
-use std::io::{self, Write};
+use std::{env, fs};
+use std::io::{self, Read, Write};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, ThreadId};
 use num_cpus;
 use core_affinity;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 use crossbeam::channel;
+use signal::Signal;
+use signal::SignalType;
+
+use processor::MONITOR;
 
 
 
@@ -17,6 +23,18 @@ enum EngineMode {
     SingleCoreSingleThread,
     MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex,
     MultiCoreMultipleThreadsEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex
+}
+
+
+impl EngineMode {
+    fn from_str(mode: &str) -> Option<EngineMode> {
+        match mode.to_lowercase().as_str() {
+            "single_core_single_thread" => Some(EngineMode::SingleCoreSingleThread),
+            "multi_core_multiple_threads_each_thread_searching_against_whole_index" => Some(EngineMode::MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex),
+            "multi_core_multiple_threads_each_thread_in_same_core_searching_against_single_sharded_subset_of_index" => Some(EngineMode::MultiCoreMultipleThreadsEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex),
+            _ => None,
+        }
+    }
 }
 
 struct ThreadData {
@@ -226,9 +244,64 @@ fn listen_for_user_queries(query_tx: channel::Sender<Query>,query_results: Arc<Q
 
 fn main() {
     // Example documents 
-    let doc1 = Document::new("doc1", DocumentFormat::PlainText("Rust is a systems programming language.".into()));
-    let doc2 = Document::new("doc2", DocumentFormat::PlainText("Search engines are essential for the web.".into()));
-    let documents = vec![doc1, doc2];
+    // let doc1 = Document::new("doc1", DocumentFormat::PlainText("Rust is a systems programming language.".into()));
+    // let doc2 = Document::new("doc2", DocumentFormat::PlainText("Search engines are essential for the web.".into()));
+    // let documents = vec![doc1, doc2];
+
+    // Collect the command-line arguments
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 3 {
+        eprintln!("Usage: {} <documents_folder> <engine_mode>", args[0]);
+        eprintln!("Modes: single_core_single_thread, multi_core_multiple_threads_each_thread_searching_against_whole_index, multi_core_multiple_threads_each_thread_in_same_core_searching_against_single_sharded_subset_of_index");
+        return;
+    }
+
+    
+    let documents_folder = &args[1];
+
+    let mode_str = &args[2];
+    let mode = match EngineMode::from_str(mode_str) {
+        Some(m) => m,
+        None => {
+            eprintln!("Invalid engine mode: {}", mode_str);
+            return;
+        }
+    };
+
+    let mut documents = Vec::new();
+
+    for entry in fs::read_dir(documents_folder).expect("Failed to read documents directory") {
+        let entry = entry.expect("Failed to read directory entry");
+        let path = entry.path();
+
+        if path.is_file() {
+            let file_extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            let file_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+
+            let mut file_content = String::new();
+            let mut file = fs::File::open(&path).expect("Failed to open file");
+            file.read_to_string(&mut file_content).expect("Failed to read file");
+
+            let document_format = match file_extension {
+                "txt" => DocumentFormat::PlainText(file_content),
+                "json" => DocumentFormat::Json(file_content), // Store raw JSON string
+                "html" => DocumentFormat::Html(file_content),
+                _ => {
+                    println!("Skipping unsupported file type: {}", file_extension);
+                    continue;
+                }
+            };
+
+            let document = Document::new(file_name, document_format);
+            documents.push(document);
+        }
+    }
+
+    // Now you have all the documents read and parsed into the `documents` vector.
+    // You can proceed with creating the search index.
+
+    println!("Loaded {} documents", documents.len());
 
     // Create a new query queue
     let (query_tx, query_rx): (channel::Sender<Query>, channel::Receiver<Query>) = channel::unbounded();
@@ -251,13 +324,37 @@ fn main() {
          tokio::runtime::Runtime::new().unwrap().block_on(server::run_get_results_server(server_query_results_clone)).unwrap();
      });
 
-    let mode = EngineMode::SingleCoreSingleThread; // Set the desired mode here
-    let engine= Engine::new(mode);
     let query_results_clone = Arc::clone(&query_results);
+    // let mode = EngineMode::SingleCoreSingleThread; // Set the desired mode here
+    let engine= Engine::new(mode);
+    let (tx_processors_shutdown, rx_processors_shutdown): (Sender<String>, Receiver<String>) = mpsc::channel();
+    let monitor = MONITOR.lock().unwrap();
+    monitor.start_monitoring();
     engine.start_engine(documents,query_rx_clone,query_results_clone);
     // The main thread can do other tasks, or join the spawned thread if necessary
-    loop {
-        // Here you might process queries, or just keep the main thread alive
-        thread::sleep(std::time::Duration::from_secs(1));
+
+    println!("Do you wish to shut down? (Press Ctrl+C to exit or send SIGINT signal): ");
+    let (tx_signal, rx_signal) = std::sync::mpsc::channel();
+    let signal_handler = Arc::new(Mutex::new(tx_signal));
+
+    // Spawn a thread to handle signals
+    let signal_handler_clone = signal_handler.clone();
+    thread::spawn(move || {
+        // Listen for SIGINT
+        for _signal in Signal::new(SignalType::INT).unwrap() {
+            signal_handler_clone.lock().unwrap().send(()).unwrap();
         }
+    });
+
+    // Wait for SIGINT signal
+    rx_signal.recv().unwrap();
+
+    // Shut down all processors
+    let monitor = MONITOR.lock().unwrap();
+    monitor.shutdown_all_processors(tx_processors_shutdown);
+    println!("Shutting down, waiting for all processor threads to stop...");
+    match rx_processors_shutdown.recv() {
+        Ok(message) => println!("{}", message),
+        Err(e) => eprintln!("Failed to receive shutdown message: {}", e),
+    }
 }
