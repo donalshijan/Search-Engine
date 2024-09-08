@@ -9,11 +9,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, ThreadId};
 use num_cpus;
 use core_affinity;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 use crossbeam::channel;
-use signal::Signal;
-use signal::SignalType;
+
+
+use signal_hook::consts::signal::*;
+use signal_hook::iterator::Signals;
 
 use processor::MONITOR;
 
@@ -70,7 +72,7 @@ impl Engine {
                     core_affinity::set_for_current(cores[0]);
                     let thread_id = thread::current().id();
                     let processor = Processor::new(1,search_library,Arc::new(RwLock::new(vec![cores[0]])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
-                    let processor=processor.store_in_global();
+                    let processor=processor.add_to_monitor();
                     processor.process_queries();
                     thread_id
                 });  
@@ -101,15 +103,15 @@ impl Engine {
                     for j in 0..num_threads_per_core {
                         let processor_id = i * num_threads_per_core + j+1;
                         // let query_queue_clone = Arc::clone(&query_queue);
-                        let query_rx_clone = query_rx.clone();
-                        let query_results_clone = Arc::clone(&query_results);
-                        let search_library_clone = Arc::clone(&search_library);
+                        let query_rx = query_rx.clone();
+                        let query_results = Arc::clone(&query_results);
+                        let search_library = Arc::clone(&search_library);
                         let handle = thread::spawn(move || {
                             // Pin this thread to the specific core
                             core_affinity::set_for_current(core_id);
                             let thread_id = thread::current().id();
-                            let processor = Processor::new(processor_id,search_library_clone,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx_clone,query_results_clone);
-                            let processor=processor.store_in_global();
+                            let processor = Processor::new(processor_id,search_library,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
+                            let processor=processor.add_to_monitor();
                             processor.process_queries();
                             thread_id
                         });
@@ -136,17 +138,17 @@ impl Engine {
                 let search_library = Arc::new(RwLock::new(search_library));
                 for (i,core_id) in cores.iter().enumerate(){
                     let processor_id = i+1;
-                    let query_rx_clone = query_rx.clone();
-                    let query_results_clone = Arc::clone(&query_results);
-                    let search_library_clone = Arc::clone(&search_library);
+                    let query_rx = query_rx.clone();
+                    let query_results = Arc::clone(&query_results);
+                    let search_library = Arc::clone(&search_library);
                     let core_id = *core_id;
                     let handle = thread::spawn(move || {
                         // Pin this thread to the specific core
                         core_affinity::set_for_current(core_id);
                         let thread_id = thread::current().id();
-                        let processor = Processor::new(processor_id,search_library_clone,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx_clone,query_results_clone);
-                        let processor=processor.store_in_global();
-                        processor.process_each_query_across_all_threads_in_a_core();
+                        let processor = Processor::new(processor_id,search_library,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
+                        let processor=processor.add_to_monitor();
+                        processor.process_each_query_across_all_threads_in_a_core(core_id);
                         thread_id
                     });
         
@@ -340,9 +342,24 @@ fn main() {
     // Spawn a thread to handle signals
     let signal_handler_clone = signal_handler.clone();
     thread::spawn(move || {
+        let mut signals = Signals::new(&[SIGINT, SIGTERM]).unwrap();
         // Listen for SIGINT
-        for _signal in Signal::new(SignalType::INT).unwrap() {
-            signal_handler_clone.lock().unwrap().send(()).unwrap();
+        for sig in signals.forever() {
+            match sig {
+                SIGINT => {
+                    println!("Received SIGINT, shutting down gracefully...");
+                    // Perform any cleanup or shutdown tasks here
+                    signal_handler_clone.lock().unwrap().send(()).unwrap();
+                    break;
+                }
+                SIGTERM => {
+                    println!("Received SIGTERM, shutting down gracefully...");
+                    signal_handler_clone.lock().unwrap().send(()).unwrap();
+                    break;
+                }
+                _ => unreachable!(),
+            }
+            
         }
     });
 

@@ -68,14 +68,12 @@ impl Processor{
         // Directly push the new thread ID into the existing Vec<ThreadId>
         self.thread_ids.write().unwrap().push(new_thread_id);
     }
-    pub fn store_in_global(self) -> Arc<Self> {
+    pub fn add_to_monitor(self) -> Arc<Self> {
         let processor = Arc::new(self);
         add_new_processor(processor.clone());
         processor
     }
     pub fn process_queries(&self){
-        let query_rx_clone = self.query_rx.clone();
-        let query_results_clone = self.query_results.clone();
 
         // Set up a custom panic hook to log errors or clean up resources if needed
         panic::set_hook(Box::new(|panic_info| {
@@ -86,13 +84,13 @@ impl Processor{
         loop {
             let result = panic::catch_unwind(|| {
                 // Fetch a query from the queue
-                match query_rx_clone.recv() {
+                match self.query_rx.recv() {
                     Ok(query) => {
                         let query_result = {
                             let search_library = self.search_library.read().unwrap();
-                            search_library.search(&query)
+                            search_library.search(&query,None)
                         };
-                        query_results_clone.insert(query.id.clone(), query_result);
+                        self.query_results.insert(query.id.clone(), query_result);
                     }
                     Err(_) => {
                         std::thread::sleep(Duration::from_millis(100));
@@ -125,7 +123,7 @@ impl Processor{
         }
     }
 
-    pub fn process_each_query_across_all_threads_in_a_core(&self){
+    pub fn process_each_query_across_all_threads_in_a_core(&self,core_id: CoreId){
         let result_store: Arc<Mutex<QueryResult>>=Arc::new(Mutex::new(QueryResult::new("".to_string(),"".to_string(),vec![("".to_string(),0)],Duration::ZERO)));
         let current_item: Arc<(Mutex<Option<Query>>, Condvar)> = Arc::new((Mutex::new(None), Condvar::new()));
         let num_cores = core_affinity::get_core_ids().unwrap().len();
@@ -136,8 +134,7 @@ impl Processor{
                     1 // Default to 1 if no cores are found
                 };
         let barrier = Arc::new(Barrier::new(num_threads_per_core));
-        let search_library = self.search_library.clone();
-        let query_results = self.query_results.clone();
+        
         let thread_ids: Vec<ThreadId> = Vec::new();
         let mut handles: Vec<ThreadData>=Vec::new();
         panic::set_hook(Box::new(|panic_info| {
@@ -147,14 +144,28 @@ impl Processor{
         for i in 0..num_threads_per_core {
             let result_store_clone = Arc::clone(&result_store);
             let current_item_clone = Arc::clone(&current_item);
-            let search_library_clone = search_library.clone();
-            let query_results_clone =  query_results.clone();
+            // Extract a subset of the index for this thread
+            let search_library =  self.search_library.clone();
+            let original_index = search_library.read().unwrap().index.to_owned();
+            let keys: Vec<String> = original_index.keys().cloned().collect();
+            // keys.sort();
+            let shard_size = keys.len() / num_threads_per_core;
+            let start = i * shard_size;
+            let end = ((i + 1) * shard_size).min(keys.len());
+            // let subset_shard_of_original_index: HashMap<String, Vec<String>> = keys[start..end]
+            // .iter()
+            // .filter_map(|key| original_index.get(key).map(|value| (key.clone(), value.clone())))
+            // .collect();
+
+            // let search_library_clone = Arc::new(RwLock::new(SearchLibrary::create_index_from_existing_index(subset_shard_of_original_index)));
+            let query_results_clone =  self.query_results.clone();
             let barrier_clone = Arc::clone(&barrier);
             let mut thread_ids = thread_ids.clone();
             let  last_heartbeat = self.last_heartbeat.clone();
             let  is_alive = self.is_alive.clone();
-            core_affinity::set_for_current(self.core_ids.read().unwrap()[0]);
+            core_affinity::set_for_current(core_id);
             let handle = thread::spawn(move || {
+                let key_range = &keys[start..end]; 
                 thread_ids.push(thread::current().id());
                 loop {
                     let result = panic::catch_unwind(|| {
@@ -170,8 +181,8 @@ impl Processor{
                             barrier_clone.wait();
                             // Scope the search_library lock to ensure it's released before the second barrier
                             let result = {
-                                let search_library = search_library_clone.read().unwrap();  // (2)
-                                search_library.search(query)
+                                let search_library = search_library.read().unwrap();  // (2)
+                                search_library.search(query,Some(key_range))
                             };  // Lock is dropped here when search_library goes out of scope
                             let mut old_result = result_store_clone.lock().unwrap();
                             let updated_result = old_result.aggregate_result(result).clone();
@@ -307,7 +318,7 @@ impl Processor{
 
     pub fn is_alive(&self) -> bool {
         let last_heartbeat = self.last_heartbeat.lock().unwrap();
-        last_heartbeat.elapsed() < Duration::from_secs(10) && Arc::strong_count(&self.search_library) > 0 && self.is_alive.load(Ordering::SeqCst)
+        last_heartbeat.elapsed() < Duration::from_secs(20) && Arc::strong_count(&self.search_library) > 0 && self.is_alive.load(Ordering::SeqCst)
     }
 
     pub fn restart(&self) {

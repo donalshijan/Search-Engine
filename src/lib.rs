@@ -354,14 +354,28 @@ impl SearchLibrary {
         documents.get(doc_id).cloned()
     }
 
-    pub fn search(&self,query:& Query)-> QueryResult{
+    pub fn search(&self, query: &Query, shard_range: Option<&[String]>) -> QueryResult {
         let mut query = query.clone();
-        let tokens:Vec<String>=query.tokenize_query();
+        let tokens: Vec<String> = query.tokenize_query();
         let mut result_docs = HashMap::new();
+
         for token in tokens {
-            if let Some(docs) = self.index.get(&token) {
-                for doc_id in docs {
-                    *result_docs.entry(doc_id.clone()).or_insert(0) += 1;
+            // Determine whether to search the full index or a subset (shard)
+            if let Some(keys_subset) = shard_range {
+                // Search only within the specified subset of keys
+                if keys_subset.contains(&token) {
+                    if let Some(docs) = self.index.get(&token) {
+                        for doc_id in docs {
+                            *result_docs.entry(doc_id.clone()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            } else {
+                // Search the entire index
+                if let Some(docs) = self.index.get(&token) {
+                    for doc_id in docs {
+                        *result_docs.entry(doc_id.clone()).or_insert(0) += 1;
+                    }
                 }
             }
         }
@@ -373,7 +387,7 @@ impl SearchLibrary {
         let duration_since_query_arrival = current_time
             .duration_since(query.query_arrival_time)
             .unwrap_or_else(|_| Duration::from_secs(0));
-        QueryResult::new(query.clone().id,query.clone().query_string,sorted_docs,duration_since_query_arrival)
+        QueryResult::new(query.id.clone(), query.query_string.clone(), sorted_docs, duration_since_query_arrival)
     }
 }
 
