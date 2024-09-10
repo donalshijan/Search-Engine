@@ -3,7 +3,7 @@ This is a search engine application, written in rust taking full advantage of it
 Search engine constructs an index by using a bunch of documents specified in a directory later the index is used to search for queries and produce results.
 Search engine can operate on different modes or configurations so to say.
 
-Project also implements a monitoring service which will monitor each processor and calculate memory usage and CPU usage for each core and thread in the background.
+Project also implements a monitoring service which will monitor each processor and all the cores and threads it's assigned to, it can futher be extended to calculate memory usage and CPU usage for each core and thread but since it would rely on OS platform specific filesystem and APIs it has been left open for implementation by the user, but some skeletal code has been retained in comments.
 
 Shutdown and thread terminations are handled gracefully.
 
