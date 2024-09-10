@@ -56,7 +56,7 @@ impl Engine {
     }
 
     // Start the engine based on the engine mode
-    pub fn start_engine(&self,documents: Vec<Document>,query_rx: channel::Receiver<Query> ,query_results: Arc<QueryResults>) {
+    pub fn start_engine(&self,documents: Vec<Document>,query_rx: channel::Receiver<Query> ,query_results: Arc<QueryResults>,tx: Sender<String>) {
         match self.engine_mode {
             EngineMode::SingleCoreSingleThread => {
                 // Handle SingleInstanceSingleCore
@@ -79,6 +79,10 @@ impl Engine {
                 match handle.join() {
                     Ok(_) => println!("Processor Terminated."),
                     Err(e) => eprintln!("Processor thread panicked: {:?}", e),
+                }
+                // Send a message through the transmitter to notify the main thread
+                if let Err(e) = tx.send("All processors have been shut down.".to_string()) {
+                    eprintln!("Failed to send shutdown notification: {}", e);
                 }
             }
             EngineMode::MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex => {
@@ -126,6 +130,9 @@ impl Engine {
                         Err(e) => eprintln!("Processor no. {}'s running Thread panicked: {:?}", thread_data.processor_id, e),
                     }
                 }
+                if let Err(e) = tx.send("All processors have been shut down.".to_string()) {
+                    eprintln!("Failed to send shutdown notification: {}", e);
+                }
             }
             EngineMode::MultiCoreMultipleThreadsEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex => {
                 let mut handles = Vec::new();
@@ -155,48 +162,15 @@ impl Engine {
                     handles.push(ThreadData { processor_id, handle });
 
                 }
-
-                //********************** */
-                /*
-                let num_cores = core_affinity::get_core_ids().unwrap().len();
-                let total_threads = num_cpus::get();
-                let num_threads_per_core = if num_cores > 0 {
-                    total_threads / num_cores
-                } else {
-                    1 // Default to 1 if no cores are found
-                };
-                 let shard_size = documents.len() / num_cores;
-                for i in 0..num_threads_per_core {
-                    let mut search_library = SearchLibrary::new();
-                    let shard = &documents[i * shard_size..(i + 1) * shard_size];
-                    for doc in shard {
-                        search_library.add_document_to_index(doc);
-                    }
-                    let search_library = Arc::new(Mutex::new(search_library));
-                    // let search_library_clone = Arc::clone(&search_library);
-                    for (j,core_id) in cores.iter().enumerate() {
-                        let thread_id = j * num_threads_per_core + i;
-                        let query_queue_clone = Arc::clone(&query_queue);
-                        let query_results_clone = Arc::clone(&query_results);
-                        let search_library_clone = Arc::clone(&search_library);
-                        let core_id = *core_id;
-                        let handle = thread::spawn(move || {
-                            // Pin this thread to the specific core
-                            core_affinity::set_for_current(core_id);
-                            let thread_id = thread::current().id();
-                            let processor = Processor::new(search_library_clone,core_id,thread_id);
-                            processor.process_queries(query_queue_clone,query_results_clone);
-                        });
-            
-                        handles.push(ThreadData { id: thread_id, handle });
-                    }
-                }*/
                 // Join all threads
                 for thread_data in handles {
                     match thread_data.handle.join() {
                         Ok(_) => println!("Processor no. {} Terminated", thread_data.processor_id),
                         Err(e) => eprintln!("Processor no. {}'s running Thread panicked: {:?}", thread_data.processor_id, e),
                     }
+                }
+                if let Err(e) = tx.send("All processors have been shut down.".to_string()) {
+                    eprintln!("Failed to send shutdown notification: {}", e);
                 }
             }
         }
@@ -332,7 +306,7 @@ fn main() {
     let (tx_processors_shutdown, rx_processors_shutdown): (Sender<String>, Receiver<String>) = mpsc::channel();
     let monitor = MONITOR.lock().unwrap();
     monitor.start_monitoring();
-    engine.start_engine(documents,query_rx_clone,query_results_clone);
+    engine.start_engine(documents,query_rx_clone,query_results_clone,tx_processors_shutdown.clone());
     // The main thread can do other tasks, or join the spawned thread if necessary
 
     println!("Do you wish to shut down? (Press Ctrl+C to exit or send SIGINT signal): ");
@@ -368,7 +342,7 @@ fn main() {
 
     // Shut down all processors
     let monitor = MONITOR.lock().unwrap();
-    monitor.shutdown_all_processors(tx_processors_shutdown);
+    monitor.shutdown_all_processors();
     println!("Shutting down, waiting for all processor threads to stop...");
     match rx_processors_shutdown.recv() {
         Ok(message) => println!("{}", message),

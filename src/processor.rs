@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Barrier, Condvar, Mutex, RwLock};
 use std::{sync::Arc, thread::ThreadId};
 use std::time::{Duration, Instant};
@@ -148,7 +147,7 @@ impl Processor{
             let search_library =  self.search_library.clone();
             let original_index = search_library.read().unwrap().index.to_owned();
             let keys: Vec<String> = original_index.keys().cloned().collect();
-            // keys.sort();
+            drop(original_index);
             let shard_size = keys.len() / num_threads_per_core;
             let start = i * shard_size;
             let end = ((i + 1) * shard_size).min(keys.len());
@@ -304,17 +303,6 @@ impl Processor{
     //     &self.thread_ids.
     // }
 
-    // Example method to get memory usage
-    pub fn memory_usage(&self) -> usize {
-        // Dummy implementation
-        // You should replace this with actual memory usage calculation
-        0
-    }
-
-    pub fn thread_cpu_usage(&self) -> f64 {
-        // Implement CPU usage calculation for the thread
-        20.0 // Example value, replace with actual implementation
-    }
 
     pub fn is_alive(&self) -> bool {
         let last_heartbeat = self.last_heartbeat.lock().unwrap();
@@ -348,7 +336,7 @@ impl Monitor {
         }
     }
 
-    pub fn shutdown_all_processors(&self,tx: Sender<String>) {
+    pub fn shutdown_all_processors(&self) {
         // Clone the processors Arc to avoid holding the lock longer than necessary
         let processors = self.processors.clone();
     
@@ -359,25 +347,27 @@ impl Monitor {
     
         // Wait a moment to ensure all processors stop
         thread::sleep(Duration::from_millis(100));
-
-        // Send a message through the transmitter to notify the main thread
-        if let Err(e) = tx.send("All processors have been shut down.".to_string()) {
-            eprintln!("Failed to send shutdown notification: {}", e);
-        }
     }
 
     pub fn start_monitoring(&self) {
         let processors = self.processors.clone();
         thread::spawn(move || {
             loop {
+                {
+                    // Acquire a write lock to modify the processors list
+                    let mut processors = processors.clone();
+                    
+                    // Retain only those processors that are alive
+                    processors.retain(|processor| processor.is_alive());
+                }
                 let mut table = Table::new();
                 
                 // Header for the table
                 table.add_row(Row::new(vec![
                     Cell::new("Type"),
                     Cell::new("Id"),
-                    Cell::new("CPU Usage (%)"),
-                    Cell::new("Memory Usage (bytes)"),
+                    // Cell::new("CPU Usage (%)"),
+                    // Cell::new("Memory Usage (bytes)"),
                     Cell::new("Processor No./No.s"),
                 ]));
                 
@@ -396,9 +386,16 @@ impl Monitor {
                 // Sort and display core and thread information
                 for (core_id, processors_in_core) in core_data {
                     // Core information (aggregated CPU and memory usage for all threads on this core)
-                    let core_cpu_usage: f64 = processors_in_core.iter().map(|p| p.thread_cpu_usage()).sum();
-                    let core_memory_usage: usize = processors_in_core.iter().map(|p| p.memory_usage()).sum();
-                    
+                    // let core_cpu_usage: f64 = processors_in_core.iter().map(|p| p.cpu_usage()).sum();
+                    // let core_memory_usage: usize = processors_in_core.iter().map(|p| p.memory_usage()).sum();
+                    // let mut processor_threads: Vec<ThreadId> = Vec::new();
+                    // for processor in processors_in_core.clone() {
+                    //     for thread_id in processor.thread_ids.read().unwrap().clone(){
+                    //         processor_threads.push(thread_id);
+                    //     }
+                    // }
+                    // let core_cpu_usage: f64 = cpu_usage(processor_threads.clone());
+                    // let core_memory_usage: usize = memory_usage(processor_threads);
                     let processor_ids: String = processors_in_core
                     .iter()                                 
                     .map(|processor| processor.id.to_string()) 
@@ -408,8 +405,8 @@ impl Monitor {
                     table.add_row(Row::new(vec![
                         Cell::new("Core"),
                         Cell::new(&core_id_to_string(core_id)),
-                        Cell::new(&format!("{:.2}", core_cpu_usage)),
-                        Cell::new(&core_memory_usage.to_string()),
+                        // Cell::new(&format!("{:.2}", core_cpu_usage)),
+                        // Cell::new(&core_memory_usage.to_string()),
                         Cell::new(&processor_ids),
                     ]));
                     
@@ -419,8 +416,8 @@ impl Monitor {
                             table.add_row(Row::new(vec![
                                 Cell::new("Thread"),
                                 Cell::new(&thread_id_to_string(thread_id.clone())),
-                                Cell::new(&format!("{:.2}", processor.thread_cpu_usage())),
-                                Cell::new(&processor.memory_usage().to_string()),
+                                // Cell::new(&format!("{:.2}", cpu_usage(vec![thread_id]))),
+                                // Cell::new(&memory_usage(vec![thread_id]).to_string()),
                                 Cell::new(&processor.id.to_string())
                             ]));
                         }
@@ -443,3 +440,15 @@ fn add_new_processor(processor: Arc<Processor>) {
     let mut monitor = MONITOR.lock().unwrap();
     monitor.add_processor(processor);
 }
+
+// Example method to get memory usage
+// pub fn memory_usage(ids: Vec<ThreadId>) -> usize {
+//     // Dummy implementation
+//     // You should replace this with actual memory usage calculation
+//     0
+// }
+
+// pub fn cpu_usage(ids: Vec<ThreadId>) -> f64 {
+//     // Implement CPU usage calculation for the thread
+//     20.0 // Example value, replace with actual implementation
+// }
