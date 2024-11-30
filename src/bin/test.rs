@@ -101,11 +101,11 @@ async  fn test_query_performance() -> Result<(), Box<dyn std::error::Error>> {
     // Calculate the average processing time
     let average_processing_time = total_processing_time / query_count as f64;
     
-    // Write the result to result.txt
+    // Write the result to results.txt
     let mut result_file = OpenOptions::new()
     .append(true)  // Open in append mode
     .create(true)  // Create the file if it doesn't exist
-    .open("result.txt")?;
+    .open("results.txt")?;
     writeln!(result_file, "Average query processing time: {}", average_processing_time)?;
 
     Ok(())

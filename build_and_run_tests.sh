@@ -16,7 +16,7 @@ else
 fi
 
 # File to store results
-RESULT_FILE="result.txt"
+RESULT_FILE="results.txt"
 echo "Creating/clearing result file: $RESULT_FILE"
 > "$RESULT_FILE"
 

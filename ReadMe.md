@@ -101,7 +101,7 @@ To run the test program
 cargo run --bin test
 ```
 # Build and Run Test
-I have also written a shell script which will build and run the project in all modes and run the same performance test program in each of those modes and calculate average processing time for processing x amount of queries in each mode and log the result to result.txt 
+I have also written a shell script which will build and run the project in all modes and run the same performance test program in each of those modes and calculate average processing time for processing x amount of queries in each mode and log the result to results.txt 
 
 To run the script 
 
