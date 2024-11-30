@@ -1,5 +1,4 @@
-use std::fs::{File, OpenOptions};
-use std::io::BufReader;
+
 use std::{collections::HashMap, vec};
 use regex::Regex;
 use scraper::{Html, Selector};
@@ -9,11 +8,9 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use lazy_static::lazy_static;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::io::BufRead;
-use tokio::net::TcpStream;
-use std::io::Write;
 
+
+// Global store for storing A documents in the search library in a hashmap with document id used for look up
 lazy_static! {
     static ref DOCUMENTS: Mutex<HashMap<String, Document>> = Mutex::new(HashMap::new());
 }
@@ -153,7 +150,8 @@ impl Query {
             .collect();
         self.tokens.clone()
     }
-
+    
+    //This process_query method might be obsolete
     pub fn process_query(&self, index: &HashMap<String, Vec<String>>) -> Vec<String> {
         
         // Find relevant document IDs
@@ -186,26 +184,26 @@ impl QueryResult {
     }
     pub fn aggregate_result(&mut self,new_result:QueryResult)-> & mut QueryResult{
         // Check if self.query_id is the dummy value
-    if self.query_id.is_empty() {
-        // Copy the entire new_result to self
-        self.query_id = new_result.query_id;
-        self.query_string = new_result.query_string;
-        self.documents = new_result.documents;
-        self.query_processing_time = new_result.query_processing_time;
-    } else if self.query_id != new_result.query_id {
-        // If query_id doesn't match, return early
-        return self;
-    } else {
-        // If query_id matches, aggregate the results
-        for document in new_result.documents {
-            self.documents.push(document);
+        if self.query_id.is_empty() {
+            // Copy the entire new_result to self
+            self.query_id = new_result.query_id;
+            self.query_string = new_result.query_string;
+            self.documents = new_result.documents;
+            self.query_processing_time = new_result.query_processing_time;
+        } else if self.query_id != new_result.query_id {
+            // If query_id doesn't match, return early
+            return self;
+        } else {
+            // If query_id matches, aggregate the results
+            for document in new_result.documents {
+                self.documents.push(document);
+            }
+            // Sort documents by frequency in descending order
+            self.documents.sort_by(|a, b| b.1.cmp(&a.1));
+            self.query_processing_time = std::cmp::max(self.query_processing_time, new_result.query_processing_time);
         }
-        // Sort documents by frequency in descending order
-        self.documents.sort_by(|a, b| b.1.cmp(&a.1));
-        self.query_processing_time = std::cmp::max(self.query_processing_time, new_result.query_processing_time);
-    }
-    
-    self
+        
+        self
     }
 }
 
@@ -251,7 +249,7 @@ impl fmt::Display for QueryResult {
     }
 }
 
-
+//this struct might be obsolete
 pub struct QueryQueue {
     queue: Arc<Mutex<VecDeque<Query>>>,
 }
@@ -353,7 +351,7 @@ impl SearchLibrary {
         let documents = DOCUMENTS.lock().unwrap();
         documents.get(doc_id).cloned()
     }
-
+    // Method to search the query in a subset of the search library index specified by shard_range if not specified then search is carried in the whole index
     pub fn search(&self, query: &Query, shard_range: Option<&[String]>) -> QueryResult {
         let mut query = query.clone();
         let tokens: Vec<String> = query.tokenize_query();
@@ -391,69 +389,3 @@ impl SearchLibrary {
     }
 }
 
-pub async  fn test_query_performance() -> Result<(), Box<dyn std::error::Error>> {
-    // Open the queries.txt file
-    let file = File::open("queries.txt")?;
-    let reader = BufReader::new(file);
-    
-    let mut query_ids = VecDeque::new(); // To store query IDs
-    let mut total_processing_time = 0.0;
-    let mut query_count = 0;
-
-    // Loop to send each query
-    for line in reader.lines() {
-        let query = line?;
-
-        // Create a TcpStream to connect to the query server (sending query)
-        let mut stream = TcpStream::connect("127.0.0.1:8080").await?;
-        
-        // Send the query directly
-        stream.write_all(query.as_bytes()).await?;
-        
-        // Read the response
-        let mut buffer = [0u8; 1024];
-        let n = stream.read(&mut buffer).await?;
-        let response_json = &buffer[..n];
-        
-        // Deserialize the response to extract `query_id`
-        let response_value: Value = serde_json::from_slice(response_json)?;
-        if let Some(query_id) = response_value["query_id"].as_str() {
-            query_ids.push_back(query_id.to_string());
-        }
-
-        query_count += 1;
-    }
-    
-    // Loop to get the results for each query
-    while let Some(query_id) = query_ids.pop_front() {
-        // Create a TcpStream to connect to the results server (fetching result)
-        let mut stream = TcpStream::connect("127.0.0.1:8081").await?;
-        
-        // Create a request with the query_id and send it
-        let request = serde_json::json!({ "query_id": query_id });
-        stream.write_all(request.to_string().as_bytes()).await?;
-        
-        // Read the response
-        let mut buffer = [0u8; 1024];
-        let n = stream.read(&mut buffer).await?;
-        let response_json = &buffer[..n];
-        
-        // Deserialize the response to extract `query_processing_time`
-        let response_value: Value = serde_json::from_slice(response_json)?;
-        if let Some(processing_time) = response_value["query_processing_time"].as_f64() {
-            total_processing_time += processing_time;
-        }
-    }
-    
-    // Calculate the average processing time
-    let average_processing_time = total_processing_time / query_count as f64;
-    
-    // Write the result to result.txt
-    let mut result_file = OpenOptions::new()
-    .append(true)  // Open in append mode
-    .create(true)  // Create the file if it doesn't exist
-    .open("result.txt")?;
-    writeln!(result_file, "Average query processing time: {}", average_processing_time)?;
-
-    Ok(())
-}

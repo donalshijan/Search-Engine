@@ -23,7 +23,7 @@ lazy_static! {
 }
 
 struct ThreadData {
-    thread_id: usize,
+    thread_no: usize,
     handle: thread::JoinHandle<ThreadId>,
 }
 
@@ -136,6 +136,7 @@ impl Processor{
         
         let thread_ids: Vec<ThreadId> = Vec::new();
         let mut handles: Vec<ThreadData>=Vec::new();
+        let processor_id = self.id.clone();
         panic::set_hook(Box::new(|panic_info| {
             eprintln!("Thread panicked: {:?}", panic_info);
             // Additional logging or cleanup can be done here
@@ -145,9 +146,7 @@ impl Processor{
             let current_item_clone = Arc::clone(&current_item);
             // Extract a subset of the index for this thread
             let search_library =  self.search_library.clone();
-            let original_index = search_library.read().unwrap().index.to_owned();
-            let keys: Vec<String> = original_index.keys().cloned().collect();
-            drop(original_index);
+            let keys: Vec<String> = search_library.read().unwrap().index.keys().cloned().collect();
             let shard_size = keys.len() / num_threads_per_core;
             let start = i * shard_size;
             let end = ((i + 1) * shard_size).min(keys.len());
@@ -191,6 +190,7 @@ impl Processor{
                         }
                         // Signal that this thread has finished processing
                         *query_item_opt = None;  // Reset the item
+                        std::mem::drop(query_item_opt);
                         cvar.notify_all(); // Notify other threads to check for the next item
                         
                         let mut last_heartbeat_lock = last_heartbeat.lock().unwrap();
@@ -213,14 +213,13 @@ impl Processor{
                                 }
                             }
                             // Panic if any other error occurs
-                            panic!("Error in thread running processor for process_each_query_across_all_threads_in_a_core: {:?}", err);
+                            panic!("Error in processor's sub thread: {:?}", err);
                         }
                     }
                 }
                 return thread::current().id()
             });
-            // handles.push(ThreadData{thread_id:thread_ids[thread_ids.len()],handle});
-            handles.push(ThreadData{thread_id:i+1,handle});
+            handles.push(ThreadData{thread_no:i+1,handle});
         }
         // Join all threads
         let (tx, rx) = mpsc::channel();
@@ -231,14 +230,14 @@ impl Processor{
         thread::spawn(move || {
             for thread_data in handles {
                 match thread_data.handle.join() {
-                    Ok(_) => {println!("Sub Thread no. {} of processor Terminated", thread_data.thread_id);
-                    let message = format!("Sub thread no. {} terminated", thread_data.thread_id);
+                    Ok(_) => {println!("Sub Thread no. {} of processor no. {} Terminated", thread_data.thread_no,processor_id);
+                    let message = format!("Sub thread no. {} of processor no. {} terminated", thread_data.thread_no,processor_id);
                     tx_monitor.send(message).unwrap();
                     }
                     Err(e) => {
                         let panic_info = format!("{:?}", e);
-                        eprintln!("Sub Thread no. {} of Processor panicked: {}", thread_data.thread_id, panic_info);
-                        let message = format!("Sub thread no. {} panicked: {}", thread_data.thread_id, panic_info);
+                        eprintln!("Sub Thread no. {} of processor no. {} panicked: {}", thread_data.thread_no, processor_id, panic_info);
+                        let message = format!("Sub thread no. {} of processor no. {} panicked: {}", thread_data.thread_no, processor_id, panic_info);
                         tx_monitor.send(message).unwrap();
                     }
                 }
@@ -279,7 +278,7 @@ impl Processor{
                 Ok(_) => continue, // Keep processing queries
                 Err(err) => {
                     for msg in rx {
-                        println!("Main thread received Message: {}", msg);
+                        println!("Processor's main thread received Message: {}", msg);
                     }
                     // Downcast the error to the type you're expecting
                     if let Some(err_str) = err.downcast_ref::<String>() {
@@ -288,7 +287,7 @@ impl Processor{
                         }
                     }
                     // Panic if any other error occurs
-                    panic!("Error in thread running processor for process_each_query_across_all_threads_in_a_core: {:?}", err);
+                    panic!("Error in processor's main thread: {:?}", err);
                 }
             }
         }

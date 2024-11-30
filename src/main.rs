@@ -23,8 +23,9 @@ use processor::MONITOR;
 
 enum EngineMode {
     SingleCoreSingleThread,
+    MultiCoreSingleThread,
     MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex,
-    MultiCoreMultipleThreadsEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex
+    MultiCoreMultipleThreadsEachThreadInEachCoreSearchingAgainstSingleShardedSubsetOfIndex
 }
 
 
@@ -32,8 +33,9 @@ impl EngineMode {
     fn from_str(mode: &str) -> Option<EngineMode> {
         match mode.to_lowercase().as_str() {
             "single_core_single_thread" => Some(EngineMode::SingleCoreSingleThread),
+            "multi_core_single_thread" => Some(EngineMode::MultiCoreSingleThread),
             "multi_core_multiple_threads_each_thread_searching_against_whole_index" => Some(EngineMode::MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex),
-            "multi_core_multiple_threads_each_thread_in_same_core_searching_against_single_sharded_subset_of_index" => Some(EngineMode::MultiCoreMultipleThreadsEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex),
+            "multi_core_multiple_threads_each_thread_in_each_core_searching_against_single_sharded_subset_of_index" => Some(EngineMode::MultiCoreMultipleThreadsEachThreadInEachCoreSearchingAgainstSingleShardedSubsetOfIndex),
             _ => None,
         }
     }
@@ -56,7 +58,7 @@ impl Engine {
     }
 
     // Start the engine based on the engine mode
-    pub fn start_engine(&self,documents: Vec<Document>,query_rx: channel::Receiver<Query> ,query_results: Arc<QueryResults>,tx: Sender<String>) {
+    pub fn start_engine(&self,documents: Vec<Document>,query_rx: channel::Receiver<Query> ,query_results: Arc<QueryResults>,tx_processors_shutdown: Sender<String>) {
         match self.engine_mode {
             EngineMode::SingleCoreSingleThread => {
                 // Handle SingleInstanceSingleCore
@@ -64,6 +66,7 @@ impl Engine {
                 for doc in &documents {
                     search_library.add_document_to_index(doc);
                 }
+                println!("Search Library Constructed.");
                 let search_library = Arc::new(RwLock::new(search_library));
                 let cores = core_affinity::get_core_ids().unwrap();
 
@@ -74,16 +77,57 @@ impl Engine {
                     let processor = Processor::new(1,search_library,Arc::new(RwLock::new(vec![cores[0]])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
                     let processor=processor.add_to_monitor();
                     processor.process_queries();
+                    println!("Processor running...");
                     thread_id
                 });  
                 match handle.join() {
                     Ok(_) => println!("Processor Terminated."),
-                    Err(e) => eprintln!("Processor thread panicked: {:?}", e),
+                    Err(e) => eprintln!("Processor thread terminated due to a panic: {:?}", e),
                 }
-                // Send a message through the transmitter to notify the main thread
-                if let Err(e) = tx.send("All processors have been shut down.".to_string()) {
+                // Send a message through the transmitter to notify processor shutdown status to the main thread
+                if let Err(e) = tx_processors_shutdown.send("All processors have been shut down.".to_string()) {
                     eprintln!("Failed to send shutdown notification: {}", e);
                 }
+            }
+            EngineMode::MultiCoreSingleThread => {
+                // Handle SingleInstanceSingleCore
+                let mut search_library = SearchLibrary::new();
+                for doc in &documents {
+                    search_library.add_document_to_index(doc);
+                }
+                println!("Search Library Constructed.");
+                let search_library = Arc::new(RwLock::new(search_library));
+                let cores = core_affinity::get_core_ids().unwrap();
+                let mut handles: Vec<ThreadData> = Vec::new();
+                for (i,core_id) in cores.into_iter().enumerate() {
+                    let processor_id = i;
+                    let query_rx = query_rx.clone();
+                    let query_results = Arc::clone(&query_results);
+                    let search_library = Arc::clone(&search_library);
+                    let handle = thread::spawn(move || {
+                        // Pin this thread to the specific core
+                        core_affinity::set_for_current(core_id);
+                        let thread_id = thread::current().id();
+                        let processor = Processor::new(i,search_library,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
+                        let processor=processor.add_to_monitor();
+                        processor.process_queries();
+                        println!("Processor no.{} running...",processor_id);
+                        thread_id
+                    }); 
+                    handles.push(ThreadData { processor_id, handle });
+                }
+                println!("All processors up and running.");
+                // Join all threads
+                for thread_data in handles {
+                    match thread_data.handle.join() {
+                        Ok(_) => println!("Processor no. {} Terminated", thread_data.processor_id),
+                        Err(e) => eprintln!("Processor no. {}'s main thread terminated due to a panic: {:?}", thread_data.processor_id, e),
+                    }
+                }
+                if let Err(e) = tx_processors_shutdown.send("All processors have been shut down.".to_string()) {
+                    eprintln!("Failed to send shutdown notification: {}", e);
+                }
+
             }
             EngineMode::MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex => {
                 // Handle SingleInstanceEachCoreNoSharding
@@ -100,6 +144,7 @@ impl Engine {
                 for doc in docs_clone {
                     search_library.add_document_to_index(&doc);
                 }
+                println!("Search Library Constructed.");
                 let search_library = Arc::new(RwLock::new(search_library));
                 let mut handles: Vec<ThreadData> = Vec::new();
                 // Spawn a thread for each core, and set its affinity
@@ -117,31 +162,33 @@ impl Engine {
                             let processor = Processor::new(processor_id,search_library,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
                             let processor=processor.add_to_monitor();
                             processor.process_queries();
+                            println!("Processor no.{}running...",processor_id);
                             thread_id
                         });
-            
                         handles.push(ThreadData { processor_id, handle });
                     }
                 }
+                println!("All processors up and running.");
                 // Join all threads
                 for thread_data in handles {
                     match thread_data.handle.join() {
                         Ok(_) => println!("Processor no. {} Terminated", thread_data.processor_id),
-                        Err(e) => eprintln!("Processor no. {}'s running Thread panicked: {:?}", thread_data.processor_id, e),
+                        Err(e) => eprintln!("Processor no. {}'s main thread terminated due to a panic: {:?}", thread_data.processor_id, e),
                     }
                 }
-                if let Err(e) = tx.send("All processors have been shut down.".to_string()) {
+                if let Err(e) = tx_processors_shutdown.send("All processors have been shut down.".to_string()) {
                     eprintln!("Failed to send shutdown notification: {}", e);
                 }
             }
-            EngineMode::MultiCoreMultipleThreadsEachThreadInSameCoreSearchingAgainstSingleShardedSubsetOfIndex => {
-                let mut handles = Vec::new();
+            EngineMode::MultiCoreMultipleThreadsEachThreadInEachCoreSearchingAgainstSingleShardedSubsetOfIndex => {
+                let mut handles: Vec<ThreadData> = Vec::new();
                 let cores = core_affinity::get_core_ids().unwrap();
                 let mut search_library = SearchLibrary::new();
                 let docs_clone = documents.clone();
                 for doc in docs_clone {
                     search_library.add_document_to_index(&doc);
                 }
+                println!("Search Library Constructed.");
                 let search_library = Arc::new(RwLock::new(search_library));
                 for (i,core_id) in cores.iter().enumerate(){
                     let processor_id = i+1;
@@ -156,20 +203,22 @@ impl Engine {
                         let processor = Processor::new(processor_id,search_library,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
                         let processor=processor.add_to_monitor();
                         processor.process_each_query_across_all_threads_in_a_core(core_id);
+                        println!("Processor no.{} running...",processor_id);
                         thread_id
                     });
         
                     handles.push(ThreadData { processor_id, handle });
 
                 }
+                println!("All processors up and running.");
                 // Join all threads
                 for thread_data in handles {
                     match thread_data.handle.join() {
                         Ok(_) => println!("Processor no. {} Terminated", thread_data.processor_id),
-                        Err(e) => eprintln!("Processor no. {}'s running Thread panicked: {:?}", thread_data.processor_id, e),
+                        Err(e) => eprintln!("Processor no. {}'s main thread terminated due to a panic: {:?}", thread_data.processor_id, e),
                     }
                 }
-                if let Err(e) = tx.send("All processors have been shut down.".to_string()) {
+                if let Err(e) = tx_processors_shutdown.send("All processors have been shut down.".to_string()) {
                     eprintln!("Failed to send shutdown notification: {}", e);
                 }
             }
@@ -229,7 +278,7 @@ fn main() {
 
     if args.len() < 3 {
         eprintln!("Usage: {} <documents_folder> <engine_mode>", args[0]);
-        eprintln!("Modes: single_core_single_thread, multi_core_multiple_threads_each_thread_searching_against_whole_index, multi_core_multiple_threads_each_thread_in_same_core_searching_against_single_sharded_subset_of_index");
+        eprintln!("Engine Modes: single_core_single_thread, multi_core_single_thread, multi_core_multiple_threads_each_thread_searching_against_whole_index, multi_core_multiple_threads_each_thread_in_each_core_searching_against_single_sharded_subset_of_index");
         return;
     }
 
@@ -237,7 +286,7 @@ fn main() {
     let documents_folder = &args[1];
 
     let mode_str = &args[2];
-    let mode = match EngineMode::from_str(mode_str) {
+    let mode: EngineMode = match EngineMode::from_str(mode_str) {
         Some(m) => m,
         None => {
             eprintln!("Invalid engine mode: {}", mode_str);
@@ -259,7 +308,7 @@ fn main() {
             let mut file = fs::File::open(&path).expect("Failed to open file");
             file.read_to_string(&mut file_content).expect("Failed to read file");
 
-            let document_format = match file_extension {
+            let document_format: DocumentFormat = match file_extension {
                 "txt" => DocumentFormat::PlainText(file_content),
                 "json" => DocumentFormat::Json(file_content), // Store raw JSON string
                 "html" => DocumentFormat::Html(file_content),
@@ -309,12 +358,11 @@ fn main() {
     engine.start_engine(documents,query_rx_clone,query_results_clone,tx_processors_shutdown.clone());
     // The main thread can do other tasks, or join the spawned thread if necessary
 
-    println!("Do you wish to shut down? (Press Ctrl+C to exit or send SIGINT signal): ");
     let (tx_signal, rx_signal) = std::sync::mpsc::channel();
     let signal_handler = Arc::new(Mutex::new(tx_signal));
-
-    // Spawn a thread to handle signals
     let signal_handler_clone = signal_handler.clone();
+    println!("Do you wish to shut down? (Press Ctrl+C to exit or send SIGINT signal): ");
+        // Spawn a thread to handle signals
     thread::spawn(move || {
         let mut signals = Signals::new(&[SIGINT, SIGTERM]).unwrap();
         // Listen for SIGINT
