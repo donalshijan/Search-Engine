@@ -29,7 +29,8 @@ struct QueryResultResponse {
     query_processing_time: Duration,
 }
 
-pub async fn run_query_requests_server(query_tx: channel::Sender<Query>) -> Result<(), Box<dyn std::error::Error>> {
+
+pub async fn run_query_requests_server(query_tx:channel::Sender<QueryChannelSenderMessage>) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
     loop {
         let (mut socket, _) = listener.accept().await?;
@@ -43,7 +44,7 @@ pub async fn run_query_requests_server(query_tx: channel::Sender<Query>) -> Resu
             let unique_id = Uuid::new_v4().to_string();
             let query = Query::new(&unique_id, &request.query);
 
-            query_tx_clone.send(query).unwrap();
+            query_tx_clone.send(QueryChannelSenderMessage::Query(query)).unwrap();
 
             // Create the response
             let response = QueryRequestResponse {
@@ -73,9 +74,9 @@ pub async fn run_get_results_server(query_results: Arc<QueryResults>) -> Result<
             let request: QueryResultRequest = serde_json::from_slice(&buffer[..n]).unwrap();
 
             // Get the query result
-            let result = query_results_clone.get_query_result(&request.query_id);
-            let result_clone = result.clone();
-            let response_message = match result_clone {
+            let result: Option<QueryResult> = query_results_clone.get_query_result(&request.query_id);
+            let result_clone: Option<QueryResult> = result.clone();
+            let response_message: String = match result_clone {
                 Some(result_clone) => {
                     format!("Query result: {}", result_clone)
                 }
@@ -92,7 +93,6 @@ pub async fn run_get_results_server(query_results: Arc<QueryResults>) -> Result<
                     Duration::ZERO
                 }
             };
-
             // Create the response
             let response = QueryResultResponse {
                 message: response_message,

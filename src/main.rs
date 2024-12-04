@@ -1,7 +1,7 @@
 mod server;
 mod processor;
 
-use processor::Processor;
+use processor::processor::Processor;
 use search_engine::*;
 use std::{env, fs};
 use std::io::{self, Read, Write};
@@ -17,8 +17,7 @@ use crossbeam::channel;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 
-use processor::MONITOR;
-
+use processor::processor::MONITOR;
 
 
 enum EngineMode {
@@ -58,7 +57,7 @@ impl Engine {
     }
 
     // Start the engine based on the engine mode
-    pub fn start_engine(&self,documents: Vec<Document>,query_rx: channel::Receiver<Query> ,query_results: Arc<QueryResults>,tx_processors_shutdown: Sender<String>) {
+    pub fn start_engine(&self,documents: Vec<Document>,query_rx: channel::Receiver<QueryChannelSenderMessage> ,query_results: Arc<QueryResults>,tx_processors_shutdown: Sender<String>) {
         match self.engine_mode {
             EngineMode::SingleCoreSingleThread => {
                 // Handle SingleInstanceSingleCore
@@ -76,8 +75,8 @@ impl Engine {
                     let thread_id = thread::current().id();
                     let processor = Processor::new(1,search_library,Arc::new(RwLock::new(vec![cores[0]])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
                     let processor=processor.add_to_monitor();
-                    processor.process_queries();
                     println!("Processor running...");
+                    processor.process_queries();
                     thread_id
                 });  
                 match handle.join() {
@@ -110,8 +109,8 @@ impl Engine {
                         let thread_id = thread::current().id();
                         let processor = Processor::new(i,search_library,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
                         let processor=processor.add_to_monitor();
-                        processor.process_queries();
                         println!("Processor no.{} running...",processor_id);
+                        processor.process_queries();
                         thread_id
                     }); 
                     handles.push(ThreadData { processor_id, handle });
@@ -161,8 +160,8 @@ impl Engine {
                             let thread_id = thread::current().id();
                             let processor = Processor::new(processor_id,search_library,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
                             let processor=processor.add_to_monitor();
-                            processor.process_queries();
                             println!("Processor no.{}running...",processor_id);
+                            processor.process_queries();
                             thread_id
                         });
                         handles.push(ThreadData { processor_id, handle });
@@ -202,8 +201,8 @@ impl Engine {
                         let thread_id = thread::current().id();
                         let processor = Processor::new(processor_id,search_library,Arc::new(RwLock::new(vec![core_id])),Arc::new(RwLock::new(vec![thread_id])),query_rx,query_results);
                         let processor=processor.add_to_monitor();
-                        processor.process_each_query_across_all_threads_in_a_core(core_id);
                         println!("Processor no.{} running...",processor_id);
+                        processor.process_each_query_across_all_threads_in_a_core(core_id);
                         thread_id
                     });
         
@@ -227,10 +226,10 @@ impl Engine {
 }
 
 // Function to listen for user queries and add them to the queue
-fn listen_for_user_queries(query_tx: channel::Sender<Query>,query_results: Arc<QueryResults>) {
+fn listen_for_user_queries(query_tx: channel::Sender<QueryChannelSenderMessage>,query_results: Arc<QueryResults>) {
     loop {
         // Prompt the user
-        print!("Enter your query: ");
+        println!("Enter your query: ");
         io::stdout().flush().unwrap(); // Ensure the prompt is displayed
 
         // Read user input
@@ -248,7 +247,7 @@ fn listen_for_user_queries(query_tx: channel::Sender<Query>,query_results: Arc<Q
         let query = Query::new(&unique_id, &input);
 
         // Enqueue the query
-        query_tx.send(query).unwrap();
+        query_tx.send(QueryChannelSenderMessage::Query(query)).unwrap();
         
         // Poll for the result
         loop {
@@ -276,8 +275,8 @@ fn main() {
     // Collect the command-line arguments
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 3 {
-        eprintln!("Usage: {} <documents_folder> <engine_mode>", args[0]);
+    if args.len() < 4 {
+        eprintln!("Usage: {} <documents_folder> <engine_mode> <mode>", args[0]);
         eprintln!("Engine Modes: single_core_single_thread, multi_core_single_thread, multi_core_multiple_threads_each_thread_searching_against_whole_index, multi_core_multiple_threads_each_thread_in_each_core_searching_against_single_sharded_subset_of_index");
         return;
     }
@@ -293,6 +292,12 @@ fn main() {
             return;
         }
     };
+
+    let run_mode = &args[3];
+    if run_mode != "testing" && run_mode != "production" {
+        eprintln!("Invalid mode: {}. Use 'testing' or 'production'.", run_mode);
+        return;
+    }
 
     let mut documents = Vec::new();
 
@@ -329,18 +334,21 @@ fn main() {
     println!("Loaded {} documents", documents.len());
 
     // Create a new query queue
-    let (query_tx, query_rx): (channel::Sender<Query>, channel::Receiver<Query>) = channel::unbounded();
-    let query_rx_clone: channel::Receiver<Query> = query_rx.clone();
+    let (query_tx, query_rx): (channel::Sender<QueryChannelSenderMessage>, channel::Receiver<QueryChannelSenderMessage>) = channel::unbounded();
+    let query_rx_clone: channel::Receiver<QueryChannelSenderMessage> = query_rx.clone();
     let query_results = Arc::new(QueryResults::new());
-    // Run the listen_for_user_queries function on a separate thread
-    let query_tx_clone: channel::Sender<Query> = query_tx.clone();
-    let query_results_clone = Arc::clone(&query_results);
-    thread::spawn(move || {
-        listen_for_user_queries(query_tx_clone,query_results_clone);
-    });
+
+    if run_mode == "production" {
+        // Run the listen_for_user_queries function on a separate thread in production mode
+        let query_tx_clone: channel::Sender<QueryChannelSenderMessage> = query_tx.clone();
+        let query_results_clone = Arc::clone(&query_results);
+        thread::spawn(move || {
+            listen_for_user_queries(query_tx_clone, query_results_clone);
+        });
+    }
 
      // Start the async server
-     let server_query_tx_clone: channel::Sender<Query> = query_tx.clone();
+     let server_query_tx_clone: channel::Sender<QueryChannelSenderMessage> = query_tx.clone();
      thread::spawn(move || {
          tokio::runtime::Runtime::new().unwrap().block_on(server::run_query_requests_server(server_query_tx_clone)).unwrap();
      });
@@ -355,13 +363,12 @@ fn main() {
     let (tx_processors_shutdown, rx_processors_shutdown): (Sender<String>, Receiver<String>) = mpsc::channel();
     let monitor = MONITOR.lock().unwrap();
     monitor.start_monitoring();
-    engine.start_engine(documents,query_rx_clone,query_results_clone,tx_processors_shutdown.clone());
+    std::mem::drop(monitor);
     // The main thread can do other tasks, or join the spawned thread if necessary
 
     let (tx_signal, rx_signal) = std::sync::mpsc::channel();
     let signal_handler = Arc::new(Mutex::new(tx_signal));
     let signal_handler_clone = signal_handler.clone();
-    println!("Do you wish to shut down? (Press Ctrl+C to exit or send SIGINT signal): ");
         // Spawn a thread to handle signals
     thread::spawn(move || {
         let mut signals = Signals::new(&[SIGINT, SIGTERM]).unwrap();
@@ -384,16 +391,20 @@ fn main() {
             
         }
     });
-
-    // Wait for SIGINT signal
-    rx_signal.recv().unwrap();
-
-    // Shut down all processors
-    let monitor = MONITOR.lock().unwrap();
-    monitor.shutdown_all_processors();
-    println!("Shutting down, waiting for all processor threads to stop...");
-    match rx_processors_shutdown.recv() {
-        Ok(message) => println!("{}", message),
-        Err(e) => eprintln!("Failed to receive shutdown message: {}", e),
-    }
+    let monitor_query_tx_clone:channel::Sender<QueryChannelSenderMessage> = query_tx.clone();
+    thread::spawn(move || {
+        // Wait for SIGINT signal
+        rx_signal.recv().unwrap();
+        // Shut down all processors
+        let monitor = MONITOR.lock().unwrap();
+        monitor.shutdown_all_processors(monitor_query_tx_clone);
+        match rx_processors_shutdown.recv() {
+            Ok(message) => println!("{}", message),
+            Err(e) => eprintln!("Failed to receive shutdown message: {}", e),
+        }
+    });
+    println!("Starting Engine...");
+    println!("Do you wish to shut down? (Press Ctrl+C to exit or send SIGINT signal): ");
+    engine.start_engine(documents,query_rx_clone,query_results_clone,tx_processors_shutdown.clone());
+    println!("Search Engine Shutdown complete.");
 }

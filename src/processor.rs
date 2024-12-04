@@ -1,3 +1,4 @@
+pub mod processor {
 use std::collections::HashMap;
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +11,7 @@ use prettytable::{Cell, Row, Table};
 use search_engine::{Query,  QueryResult, QueryResults, SearchLibrary};
 use lazy_static::lazy_static;
 use crossbeam::channel;
+use search_engine::QueryChannelSenderMessage;
 
 
 // lazy_static! {
@@ -33,7 +35,7 @@ pub struct Processor{
     search_library:Arc<RwLock<SearchLibrary>>,
     core_ids: Arc<RwLock<Vec<CoreId>>>,
     thread_ids: Arc<RwLock<Vec<ThreadId>>>,
-    query_rx: channel::Receiver<Query>,
+    query_rx: channel::Receiver<QueryChannelSenderMessage>,
     query_results: Arc<QueryResults>,
     last_heartbeat: Arc<Mutex<Instant>>,
     is_alive: Arc<AtomicBool>,
@@ -51,7 +53,7 @@ fn thread_id_to_string(thread_id: thread::ThreadId) -> String {
 }
 
 impl Processor{
-    pub fn new(id:usize,search_library: Arc<RwLock<SearchLibrary>>,core_ids: Arc<RwLock<Vec<CoreId>>>, thread_ids: Arc<RwLock<Vec<ThreadId>>>,query_rx: channel::Receiver<Query>,query_results: Arc<QueryResults>) -> Self{
+    pub fn new(id:usize,search_library: Arc<RwLock<SearchLibrary>>,core_ids: Arc<RwLock<Vec<CoreId>>>, thread_ids: Arc<RwLock<Vec<ThreadId>>>,query_rx: channel::Receiver<QueryChannelSenderMessage>,query_results: Arc<QueryResults>) -> Self{
         Processor {
             id,
             search_library,
@@ -79,45 +81,58 @@ impl Processor{
             eprintln!("Thread panicked: {:?}", panic_info);
             // Additional logging or cleanup can be done here
         }));
-
-        loop {
-            let result = panic::catch_unwind(|| {
-                // Fetch a query from the queue
-                match self.query_rx.recv() {
-                    Ok(query) => {
-                        let query_result = {
-                            let search_library = self.search_library.read().unwrap();
-                            search_library.search(&query,None)
-                        };
-                        self.query_results.insert(query.id.clone(), query_result);
-                    }
-                    Err(_) => {
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
-                }
-
-                let mut last_heartbeat_lock = self.last_heartbeat.lock().unwrap();
-                *last_heartbeat_lock = Instant::now();
-
-                if !self.is_alive.load(Ordering::SeqCst) {
-                    return Err("Processor stopped".to_string());
-                }
-
-                Ok(())
-            });
-
-            match result {
-                Ok(_) => continue, // Keep processing queries
-                Err(err) => {
-                    // Downcast the error to the type you're expecting
-                    if let Some(err_str) = err.downcast_ref::<String>() {
-                        if err_str == "Processor stopped" {
-                            break; // Gracefully stop the thread
+        let result = panic::catch_unwind(|| -> Result<(), Box<dyn std::any::Any + Send>> {
+            loop {
+                let result = {
+                    // Fetch a query from the queue
+                    match self.query_rx.recv() {
+                        Ok(QueryChannelSenderMessage::Query(query)) => {
+                            let query_result = {
+                                let search_library = self.search_library.read().unwrap();
+                                search_library.search(&query,None)
+                            };
+                            self.query_results.insert(query.id.clone(), query_result);
+                        }
+                        Ok(QueryChannelSenderMessage::Stop(message)) => {
+                            println!("Received stop signal: {}", message);
+                        }
+                        Err(_) => {
+                            std::thread::sleep(Duration::from_millis(100));
                         }
                     }
-                    // Panic if any other error occurs
-                    panic!("Error in process_queries: {:?}", err);
+                    let mut last_heartbeat_lock = self.last_heartbeat.lock().unwrap();
+                    *last_heartbeat_lock = Instant::now();
+                    if !self.is_alive.load(Ordering::SeqCst) {
+                        Err("Processor stopped".to_string())
+                    }
+                    else{
+                        Ok(())
+                    }
+                    
+                };
+    
+                match result {
+                    Ok(_) => {
+                        continue;
+                    }, // Keep processing queries
+                    Err(err) => {
+                        if err == "Processor stopped" {
+                            break; // Gracefully stop the thread
+                        }
+                        // Propagate panic explicitly
+                        std::panic::resume_unwind(Box::new(err));
+                    }
                 }
+            }
+            Ok(())
+        });
+        match result {
+            Ok(_) => {
+                println!("Processor shutting down ...");
+            }
+            Err(err) => {
+                // Panic if any other unexpected error occurs
+                panic!("Error in process_queries: {:?}", err);
             }
         }
     }
@@ -250,7 +265,7 @@ impl Processor{
         loop {
             let result = panic::catch_unwind(|| {
                 match query_rx_clone.recv() {
-                    Ok(query) => {
+                    Ok(QueryChannelSenderMessage::Query(query)) => {
                         let (lock, cvar) = &*current_item;
                         let mut current_item_lock = lock.lock().unwrap();
                         *current_item_lock = Some(query);
@@ -260,6 +275,9 @@ impl Processor{
                         while current_item_lock.is_some() {
                             current_item_lock = cvar.wait(current_item_lock).unwrap();
                         }
+                    }
+                    Ok(QueryChannelSenderMessage::Stop(message)) => {
+                        println!("Received stop signal: {}", message);
                     }
                     Err(_) => {
                         std::thread::sleep(Duration::from_millis(100));
@@ -335,7 +353,7 @@ impl Monitor {
         }
     }
 
-    pub fn shutdown_all_processors(&self) {
+    pub fn shutdown_all_processors(&self, query_tx: channel::Sender<QueryChannelSenderMessage>) {
         // Clone the processors Arc to avoid holding the lock longer than necessary
         let processors = self.processors.clone();
     
@@ -343,7 +361,14 @@ impl Monitor {
         for processor in processors.iter() {
             processor.is_alive.store(false, Ordering::SeqCst);
         }
-    
+        // Step 2: Send a "stop" message for each processor
+        let num_processors = processors.len();
+        for _ in 0..num_processors {
+            // Sending a stop signal to each processor
+            if let Err(err) = query_tx.send(QueryChannelSenderMessage::Stop("STOP".to_string())) {
+                eprintln!("Failed to send stop signal: {:?}", err);
+            }
+        }
         // Wait a moment to ensure all processors stop
         thread::sleep(Duration::from_millis(100));
     }
@@ -451,3 +476,4 @@ fn add_new_processor(processor: Arc<Processor>) {
 //     // Implement CPU usage calculation for the thread
 //     20.0 // Example value, replace with actual implementation
 // }
+}

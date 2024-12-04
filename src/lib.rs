@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 use lazy_static::lazy_static;
 
 
@@ -41,6 +41,11 @@ pub struct QueryResult {
     pub query_string : String,
     pub documents: Vec<(String, i32)>,
     pub query_processing_time: Duration,
+}
+
+pub enum QueryChannelSenderMessage {
+    Query(Query),
+    Stop(String),
 }
 
 
@@ -139,7 +144,7 @@ impl Query {
             id: id.to_string(),
             query_string: String::from(query_string),
             tokens: Vec::new(),
-            query_arrival_time: UNIX_EPOCH,
+            query_arrival_time: std::time::SystemTime::now(),
         }
     }
     
@@ -382,6 +387,7 @@ impl SearchLibrary {
         let mut sorted_docs: Vec<_> = result_docs.into_iter().collect();
         sorted_docs.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency descending
         let current_time = SystemTime::now();
+        // println!("current time {:?}", current_time);
         let duration_since_query_arrival = current_time
             .duration_since(query.query_arrival_time)
             .unwrap_or_else(|_| Duration::from_secs(0));

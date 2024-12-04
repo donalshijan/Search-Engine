@@ -29,3 +29,5 @@ desktop.ini
 # Ignore test/log files
 *.log
 *.prof
+
+results.txt
