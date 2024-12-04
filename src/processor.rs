@@ -140,7 +140,7 @@ impl Processor{
     pub fn process_each_query_across_all_threads_in_a_core(&self,core_id: CoreId){
         let result_store: Arc<Mutex<QueryResult>>=Arc::new(Mutex::new(QueryResult::new("".to_string(),"".to_string(),vec![("".to_string(),0)],Duration::ZERO)));
         let current_item: Arc<(Mutex<Option<Query>>, Condvar)> = Arc::new((Mutex::new(None), Condvar::new()));
-        let num_cores = core_affinity::get_core_ids().unwrap().len();
+        let num_cores = num_cpus::get_physical();
         let total_threads = num_cpus::get();
         let num_threads_per_core = if num_cores > 0 {
                     total_threads / num_cores

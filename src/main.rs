@@ -96,10 +96,13 @@ impl Engine {
                 }
                 println!("Search Library Constructed.");
                 let search_library = Arc::new(RwLock::new(search_library));
-                let cores = core_affinity::get_core_ids().unwrap();
+                // Get the number of physical cores
+                let physical_cores = num_cpus::get_physical();
+                let core_ids = core_affinity::get_core_ids().unwrap();
                 let mut handles: Vec<ThreadData> = Vec::new();
-                for (i,core_id) in cores.into_iter().enumerate() {
-                    let processor_id = i;
+                for i in 0..physical_cores {
+                    let core_id = core_ids[i];
+                    let processor_id = i+1;
                     let query_rx = query_rx.clone();
                     let query_results = Arc::clone(&query_results);
                     let search_library = Arc::clone(&search_library);
@@ -130,15 +133,16 @@ impl Engine {
             }
             EngineMode::MultiCoreMultipleThreadsEachThreadSearchingAgainstWholeIndex => {
                 // Handle SingleInstanceEachCoreNoSharding
-                let num_cores = core_affinity::get_core_ids().unwrap().len();
+                // Get the number of physical cores
+                let physical_cores = num_cpus::get_physical();
                 let total_threads = num_cpus::get();
-                let num_threads_per_core = if num_cores > 0 {
-                    total_threads / num_cores
+                let num_threads_per_core = if physical_cores > 0 {
+                    total_threads / physical_cores
                 } else {
                     1 // Default to 1 if no cores are found
                 };
                 let mut search_library =SearchLibrary::new();
-                let cores = core_affinity::get_core_ids().unwrap();
+                let core_ids = core_affinity::get_core_ids().unwrap();
                 let docs_clone = documents.clone();
                 for doc in docs_clone {
                     search_library.add_document_to_index(&doc);
@@ -147,7 +151,8 @@ impl Engine {
                 let search_library = Arc::new(RwLock::new(search_library));
                 let mut handles: Vec<ThreadData> = Vec::new();
                 // Spawn a thread for each core, and set its affinity
-                for (i,core_id) in cores.into_iter().enumerate() {
+                for i in 0..physical_cores {
+                    let core_id = core_ids[i];
                     for j in 0..num_threads_per_core {
                         let processor_id = i * num_threads_per_core + j+1;
                         // let query_queue_clone = Arc::clone(&query_queue);
@@ -181,7 +186,9 @@ impl Engine {
             }
             EngineMode::MultiCoreMultipleThreadsEachThreadInEachCoreSearchingAgainstSingleShardedSubsetOfIndex => {
                 let mut handles: Vec<ThreadData> = Vec::new();
-                let cores = core_affinity::get_core_ids().unwrap();
+                // Get the number of physical cores
+                let physical_cores = num_cpus::get_physical();
+                let core_ids = core_affinity::get_core_ids().unwrap();
                 let mut search_library = SearchLibrary::new();
                 let docs_clone = documents.clone();
                 for doc in docs_clone {
@@ -189,12 +196,12 @@ impl Engine {
                 }
                 println!("Search Library Constructed.");
                 let search_library = Arc::new(RwLock::new(search_library));
-                for (i,core_id) in cores.iter().enumerate(){
+                for i in 0..physical_cores {
                     let processor_id = i+1;
                     let query_rx = query_rx.clone();
                     let query_results = Arc::clone(&query_results);
                     let search_library = Arc::clone(&search_library);
-                    let core_id = *core_id;
+                    let core_id = core_ids[i];
                     let handle = thread::spawn(move || {
                         // Pin this thread to the specific core
                         core_affinity::set_for_current(core_id);
