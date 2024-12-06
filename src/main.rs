@@ -136,11 +136,16 @@ impl Engine {
                 // Get the number of physical cores
                 let physical_cores = num_cpus::get_physical();
                 let total_threads = num_cpus::get();
-                let num_threads_per_core = if physical_cores > 0 {
+                let num_threads_per_core_recommmended = if physical_cores > 0 {
                     total_threads / physical_cores
                 } else {
                     1 // Default to 1 if no cores are found
                 };
+                // If it happens to be 1 then set it to use atleast 2
+                let mut num_threads_per_core=num_threads_per_core_recommmended;
+                if num_threads_per_core_recommmended == 1{
+                    num_threads_per_core=2;
+                }
                 let mut search_library =SearchLibrary::new();
                 let core_ids = core_affinity::get_core_ids().unwrap();
                 let docs_clone = documents.clone();
