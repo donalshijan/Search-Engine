@@ -61,11 +61,9 @@ pub async fn run_query_requests_server(query_tx:channel::Sender<QueryChannelSend
 
 pub async fn run_get_results_server(query_results: Arc<QueryResults>) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:8081").await?;
-    
     loop {
         let (mut socket, _) = listener.accept().await?;
         let query_results_clone = Arc::clone(&query_results);
-
         tokio::spawn(async move {
             let mut buffer = [0u8; 1024];
 
@@ -76,6 +74,9 @@ pub async fn run_get_results_server(query_results: Arc<QueryResults>) -> Result<
             // Get the query result
             let result: Option<QueryResult> = query_results_clone.get_query_result(&request.query_id);
             let result_clone: Option<QueryResult> = result.clone();
+            // if let Some(ref res) =  result_clone{
+            //     println!("Result for query id:{} ,  No. of relevant documents found:{}, document ids:{:?}",request.query_id,res.documents.len(),res.documents);
+            // }
             let response_message: String = match result_clone {
                 Some(result_clone) => {
                     format!("Query result: {}", result_clone)

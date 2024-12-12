@@ -1,6 +1,6 @@
 pub mod processor {
 use std::collections::HashMap;
-use std::panic;
+use std::{panic, usize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Barrier, Condvar, Mutex, RwLock};
 use std::{sync::Arc, thread::ThreadId};
@@ -42,7 +42,7 @@ pub struct Processor{
 }
 
 
-#[derive(Clone)]
+#[derive(Clone,Debug)]
 enum ProcessorMessage {
     Query(Option<Query>),
     StopMessage(String)
@@ -146,6 +146,7 @@ impl Processor{
     pub fn process_each_query_across_all_threads_in_a_core(&self,core_id: CoreId){
         let result_store: Arc<Mutex<QueryResult>>=Arc::new(Mutex::new(QueryResult::new("".to_string(),"".to_string(),vec![("".to_string(),0)],Duration::ZERO)));
         let current_processor_message_item: Arc<(Mutex<Option<ProcessorMessage>>, Condvar)> = Arc::new((Mutex::new(None), Condvar::new()));
+        let num_of_sub_threads_finished_processing:Arc<(Mutex<Option<usize>>, Condvar)> = Arc::new((Mutex::new(Some(0)),Condvar::new()));
         let num_cores = num_cpus::get_physical();
         let total_threads = num_cpus::get();
         let num_threads_per_core_recommended = if num_cores > 0 {
@@ -169,6 +170,7 @@ impl Processor{
         for i in 0..num_threads_per_core {
             let result_store_clone = Arc::clone(&result_store);
             let current_processor_message_item_clone = Arc::clone(&current_processor_message_item);
+            let num_of_sub_threads_finished_processing_clone = Arc::clone(&num_of_sub_threads_finished_processing);
             // Extract a subset of the index for this thread
             let search_library =  self.search_library.clone();
             let keys: Vec<String> = search_library.read().unwrap().index.keys().cloned().collect();
@@ -191,11 +193,11 @@ impl Processor{
                 let key_range = &keys[start..end]; 
                 let thread_id = thread::current().id();
                 thread_ids.push(thread::current().id());
-                println!("sub thread id:{:?} created for processor no. {}",thread::current().id(),processor_id);
+                println!("Sub thread:{:?} created for processor no. {}",thread::current().id(),processor_id);
                 loop {
                     let result:Result<(), String> =  {
-                        let (processor_message_opt_locked, cvar) = &*current_processor_message_item_clone;
-                        let mut processor_message_opt = processor_message_opt_locked.lock().unwrap();
+                        let (processor_message_opt_lock, cvar) = &*current_processor_message_item_clone;
+                        let mut processor_message_opt = processor_message_opt_lock.lock().unwrap();
                         while processor_message_opt.is_none() {
                             processor_message_opt = cvar.wait(processor_message_opt).unwrap();
                         }
@@ -212,13 +214,16 @@ impl Processor{
                                         let search_library = search_library.read().unwrap(); // (2)
                                         search_library.search(query, Some(key_range))
                                     }; // Lock is dropped here when search_library goes out of scope
-                        
                                     let mut old_result = result_store_clone.lock().unwrap();
                                     let updated_result = old_result.aggregate_result(result).clone();
-                                    std::mem::drop(old_result);
-                        
-                                    barrier_clone.wait(); // Wait for all threads to finish processing
                                     query_results_clone.insert(updated_result.clone().query_id, updated_result);
+                                    std::mem::drop(old_result);
+                                    barrier_clone.wait(); // Wait for all threads to finish processing
+                                    {
+                                        // clear the recently processed and final aggregated result held in the shared QueryResult instance so that it can be used for processing other queries later
+                                        let mut old_result = result_store_clone.lock().unwrap();
+                                        old_result.query_id.clear();
+                                    }
                                 }
                                 ProcessorMessage::StopMessage(message) => {
                                     println!("Shutting down: {}", message);
@@ -229,19 +234,29 @@ impl Processor{
                             }
                         
                         }
-                        {
-                            // clear the recently processed and final aggregated result held in the shared QueryResult instance so that it can be used for processing other queries later
-                            let mut old_result = result_store_clone.lock().unwrap();
-                            old_result.query_id.clear();
-                        }
                         // Signal that this thread has finished processing
-                        let mut processor_message_opt = processor_message_opt_locked.lock().unwrap();
+                        barrier_clone.wait();
+                        let mut processor_message_opt = processor_message_opt_lock.lock().unwrap();
                         *processor_message_opt = None;  // Reset the item
                         cvar.notify_all(); // Notify other threads to check for the next item
                         std::mem::drop(processor_message_opt);
+                        let (num_of_sub_threads_finished_processing_lock,cvar) =  &*num_of_sub_threads_finished_processing_clone;
+                        let mut num_of_sub_threads_finished_processing_option = num_of_sub_threads_finished_processing_lock.lock().unwrap(); 
+                        let current_num_of_finished_threads = *num_of_sub_threads_finished_processing_option;
+                        let updated_num_of_finished_threads = match current_num_of_finished_threads{
+                            Some(num) => {
+                                num+1
+                            }
+                            None => {
+                                1
+                            }
+                        };
+                        *num_of_sub_threads_finished_processing_option = Some(updated_num_of_finished_threads);
+                        cvar.notify_all();
+                        std::mem::drop(num_of_sub_threads_finished_processing_option);
+                        barrier_clone.wait();
                         let mut last_heartbeat_lock = last_heartbeat.lock().unwrap();
                         *last_heartbeat_lock = Instant::now();
-                        println!("thread id:{:?} is alive:{}",thread::current().id(),is_alive.load(Ordering::SeqCst));
                         if !is_alive.load(Ordering::SeqCst) {
                             Err("Processor stopped".to_string())
                         }
@@ -294,27 +309,32 @@ impl Processor{
                 match query_rx_clone.recv() {
                     Ok(QueryChannelSenderMessage::Query(query)) => {
                         let (lock, cvar) = &*current_processor_message_item;
-                        let mut current_item_lock = lock.lock().unwrap();
-                        *current_item_lock = Some(ProcessorMessage::Query(Some(query)));
+                        let mut current_processor_message_item_option = lock.lock().unwrap();
+                        *current_processor_message_item_option = Some(ProcessorMessage::Query(Some(query)));
                         cvar.notify_all(); // Notify threads that an item is ready to be processed
+                        std::mem::drop(current_processor_message_item_option);
                         // Wait until all threads have finished processing
-                        while current_item_lock.is_some() {
-                            current_item_lock = cvar.wait(current_item_lock).unwrap();
+                        let (lock, cvar) = &*num_of_sub_threads_finished_processing;
+                        let mut num_of_sub_threads_finished_processing_option = lock.lock().unwrap();
+                        while num_of_sub_threads_finished_processing_option.is_some_and(|n| n!=num_threads_per_core) {
+                            num_of_sub_threads_finished_processing_option = cvar.wait(num_of_sub_threads_finished_processing_option).unwrap();
                         }
+                        *num_of_sub_threads_finished_processing_option = Some(0);
+                        std::mem::drop(num_of_sub_threads_finished_processing_option);
                     }
                     Ok(QueryChannelSenderMessage::Stop(message)) => {
                         println!("Received stop signal: {}", message);
                         let (lock, cvar) = &*current_processor_message_item;
-                        let mut current_item_lock = lock.lock().unwrap();
-                        *current_item_lock = Some(ProcessorMessage::StopMessage(message));
+                        let mut current_processor_message_item_option = lock.lock().unwrap();
+                        *current_processor_message_item_option = Some(ProcessorMessage::StopMessage(message));
                         cvar.notify_all(); // Notify threads that an item is ready to be processed
                         // Wait until all threads have finished processing
-                        while current_item_lock.is_some() {
-                            current_item_lock = cvar.wait(current_item_lock).unwrap();
+                        while current_processor_message_item_option.is_some() {
+                            current_processor_message_item_option = cvar.wait(current_processor_message_item_option).unwrap();
                         }
-                        std::thread::sleep(Duration::from_millis(100));
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        println!("Error:{}",err);
                         std::thread::sleep(Duration::from_millis(100));
                     }
                 }
@@ -328,19 +348,20 @@ impl Processor{
                     Ok(())
                 }
             };
-
             match result {
-                Ok(_) => continue, // Keep processing queries
+                Ok(_) => {
+                    continue}, // Keep processing queries
                 Err(err) => {
                     for msg in rx {
                         println!("Processor's main thread received Message: {}", msg);
                     }
                     if err == "Processor stopped" {
-                        std::thread::sleep(Duration::from_millis(100));
                         break; // Gracefully stop the thread
                     }
                     // Panic if any other error occurs
-                    panic!("Error in processor's main thread: {:?}", err);
+                    else{
+                        panic!("Error in processor's main thread: {:?}", err);
+                    }
                 }
             }
         }

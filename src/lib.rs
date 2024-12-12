@@ -200,8 +200,22 @@ impl QueryResult {
             return self;
         } else {
             // If query_id matches, aggregate the results
-            for document in new_result.documents {
-                self.documents.push(document);
+            // This was the previous approach which was incorrect as it made duplicate entries in the documents array when it should have updated the relevance score for existing ones
+            // for document in new_result.documents {
+            //     self.documents.push(document);
+            // }
+            for (doc_id, relevance) in new_result.documents {
+                if let Some(existing_doc) = self
+                    .documents
+                    .iter_mut()
+                    .find(|(existing_doc_id, _)| existing_doc_id == &doc_id)
+                {
+                    // Update the relevance score if the document already exists
+                    existing_doc.1 += relevance;
+                } else {
+                    // Add the document if it does not already exist
+                    self.documents.push((doc_id, relevance));
+                }
             }
             // Sort documents by frequency in descending order
             self.documents.sort_by(|a, b| b.1.cmp(&a.1));
@@ -385,7 +399,9 @@ impl SearchLibrary {
 
         // Sort documents by relevance (frequency of matching tokens)
         let mut sorted_docs: Vec<_> = result_docs.into_iter().collect();
-        sorted_docs.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency descending
+        if let None = shard_range {
+            sorted_docs.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency descending
+        }
         let current_time = SystemTime::now();
         // println!("current time {:?}", current_time);
         let duration_since_query_arrival = current_time
