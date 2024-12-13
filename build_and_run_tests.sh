@@ -71,7 +71,7 @@ ENGINE_MODES=("single_core_single_thread" "multi_core_single_thread" "multi_core
 
 # Run tests for each engine mode
 for MODE in "${ENGINE_MODES[@]}"; do
-    echo "Running tests for mode: $MODE"
+    echo "Running tests in mode: $MODE"
 
     # Write engine mode to result file
     echo "$MODE" >> "$RESULT_FILE"

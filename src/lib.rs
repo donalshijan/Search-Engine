@@ -235,7 +235,7 @@ impl fmt::Display for QueryResult {
         write!(f, "  Processing Time: {:?}\n", self.query_processing_time)?;
 
         // Fetch and print documents
-        for (doc_id, relevance) in &self.documents {
+        for (doc_id, relevance) in self.documents.iter().take(10) {
             // Fetch document from SearchLibrary (assuming you have a method for this)
             match SearchLibrary::get_document_by_id(doc_id) {
                 Some(doc) => {

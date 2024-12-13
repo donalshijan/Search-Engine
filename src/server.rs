@@ -25,6 +25,7 @@ struct QueryResultRequest {
 
 #[derive(Serialize)]
 struct QueryResultResponse {
+    documents : Vec<(String,i32)>,
     message: String,
     query_processing_time: Duration,
 }
@@ -85,8 +86,8 @@ pub async fn run_get_results_server(query_results: Arc<QueryResults>) -> Result<
                     String::from("No result yet, check again...")
                 }
             };
-            
-            let query_processing_time = match result{
+            let result_clone = result.clone();
+            let query_processing_time = match result_clone{
                 Some(result)=>{
                     result.query_processing_time
                 }
@@ -94,8 +95,17 @@ pub async fn run_get_results_server(query_results: Arc<QueryResults>) -> Result<
                     Duration::ZERO
                 }
             };
+            let result_document_ids = match result{
+                Some(result)=>{
+                    result.documents
+                }
+                None =>{
+                    vec![("".to_string(),0)]
+                }
+            };
             // Create the response
             let response = QueryResultResponse {
+                documents: result_document_ids,
                 message: response_message,
                 query_processing_time: query_processing_time,
             };
