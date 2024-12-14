@@ -430,9 +430,12 @@ impl Monitor {
     }
 
     pub fn start_monitoring(&self) {
-        let processors = self.processors.clone();
         thread::spawn(move || {
             loop {
+                // Access MONITOR singleton directly within the loop
+                let monitor = MONITOR.lock().unwrap();
+                let processors = monitor.processors.clone();
+                std::mem::drop(monitor);
                 {
                     // Acquire a write lock to modify the processors list
                     let mut processors = processors.clone();

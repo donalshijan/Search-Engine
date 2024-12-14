@@ -3,10 +3,11 @@ mod processor;
 
 use processor::processor::Processor;
 use search_engine::*;
+use std::time::Duration;
 use std::{env, fs};
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, ThreadId};
+use std::thread::{self, sleep};
 use num_cpus;
 use core_affinity;
 use std::sync::{Arc, Mutex, RwLock};
@@ -42,7 +43,8 @@ impl EngineMode {
 
 struct ThreadData {
     processor_id: usize,
-    handle: thread::JoinHandle<ThreadId>,
+    // handle: thread::JoinHandle<ThreadId>,
+    handle: thread::JoinHandle<()>,
 }
 
 
@@ -77,8 +79,9 @@ impl Engine {
                     let processor=processor.add_to_monitor();
                     println!("Processor running...");
                     processor.process_queries();
-                    thread_id
+                    // thread_id
                 });  
+                sleep(Duration::from_millis(100));
                 match handle.join() {
                     Ok(_) => println!("Processor Terminated."),
                     Err(e) => eprintln!("Processor thread terminated due to a panic: {:?}", e),
@@ -114,10 +117,11 @@ impl Engine {
                         let processor=processor.add_to_monitor();
                         println!("Processor no.{} running...",processor_id);
                         processor.process_queries();
-                        thread_id
+                        // thread_id
                     }); 
                     handles.push(ThreadData { processor_id, handle });
                 }
+                sleep(Duration::from_millis(100));
                 println!("All processors up and running.");
                 // Join all threads
                 for thread_data in handles {
@@ -172,11 +176,12 @@ impl Engine {
                             let processor=processor.add_to_monitor();
                             println!("Processor no.{}running...",processor_id);
                             processor.process_queries();
-                            thread_id
+                            // thread_id
                         });
                         handles.push(ThreadData { processor_id, handle });
                     }
                 }
+                sleep(Duration::from_millis(100));
                 println!("All processors up and running.");
                 // Join all threads
                 for thread_data in handles {
@@ -215,12 +220,13 @@ impl Engine {
                         let processor=processor.add_to_monitor();
                         println!("Processor no.{} running...",processor_id);
                         processor.process_each_query_across_all_threads_in_a_core(core_id);
-                        thread_id
+                        // thread_id
                     });
         
                     handles.push(ThreadData { processor_id, handle });
 
                 }
+                sleep(Duration::from_millis(100));
                 println!("All processors up and running.");
                 // Join all threads
                 for thread_data in handles {
@@ -239,9 +245,10 @@ impl Engine {
 
 // Function to listen for user queries and add them to the queue
 fn listen_for_user_queries(query_tx: channel::Sender<QueryChannelSenderMessage>,query_results: Arc<QueryResults>) {
+    sleep(Duration::from_millis(1000));
     loop {
         // Prompt the user
-        println!("Enter your query: ");
+        println!("\nEnter your query: ");
         io::stdout().flush().unwrap(); // Ensure the prompt is displayed
 
         // Read user input
@@ -272,6 +279,7 @@ fn listen_for_user_queries(query_tx: channel::Sender<QueryChannelSenderMessage>,
                 None => {
                     println!("No result yet, checking again...");
                     // Wait for a short period before polling again
+                    sleep(Duration::from_millis(100));
                 }
             }
         }
@@ -319,8 +327,8 @@ fn main() {
 
         if path.is_file() {
             let file_extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            let file_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
-
+            // let file_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+            let file_name_with_extension = path.file_name().and_then(|s| s.to_str()).unwrap_or("unknown"); // Include extension in the file name
             let mut file_content = String::new();
             let mut file = fs::File::open(&path).expect("Failed to open file");
             file.read_to_string(&mut file_content).expect("Failed to read file");
@@ -335,7 +343,7 @@ fn main() {
                 }
             };
 
-            let document = Document::new(file_name, document_format);
+            let document = Document::new(file_name_with_extension, document_format);
             documents.push(document);
         }
     }

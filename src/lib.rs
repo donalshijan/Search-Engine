@@ -245,10 +245,10 @@ impl fmt::Display for QueryResult {
                         DocumentFormat::Html(content) => content.lines(), // Handle HTML appropriately
                         DocumentFormat::Json(content) => content.lines(), // Handle JSON appropriately
                     };
-
+                    write!(f, "\n    Document ID(file name): {}\n", doc_id)?;
                     let mut line_count = 0;
                     while let Some(line) = lines.next() {
-                        write!(f, "    Line {}: {}\n", line_count + 1, line)?;
+                        write!(f, "     {}\n", line)?;
                         line_count += 1;
                         if line_count >= 5 {
                             break;
