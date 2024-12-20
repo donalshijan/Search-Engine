@@ -13,12 +13,21 @@ use core_affinity;
 use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 use crossbeam::channel;
+use nix::unistd::{fork, ForkResult};
+use nix::sys::wait::waitpid;
+use nix::sys::wait::WaitStatus;
+use nix::sys::signal::{kill, Signal};
+use std::process::exit;
 
 
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 
 use processor::processor::MONITOR;
+use processor::processor::cleanup_shared_memory;
+use processor::processor::initialize_shared_monitor;
+use processor::processor::start_logging_monitor_info;
+use processor::processor::{SHM_SIZE,SHM_PTR};
 
 
 enum EngineMode {
@@ -287,144 +296,191 @@ fn listen_for_user_queries(query_tx: channel::Sender<QueryChannelSenderMessage>,
 }
 
 fn main() {
-    // Example documents 
-    // let doc1 = Document::new("doc1", DocumentFormat::PlainText("Rust is a systems programming language.".into()));
-    // let doc2 = Document::new("doc2", DocumentFormat::PlainText("Search engines are essential for the web.".into()));
-    // let documents = vec![doc1, doc2];
+    // This should initialize the Monitor object contained in global MONITOR lazy static singleton
+    initialize_shared_monitor();
+    match  unsafe { fork() } {
+        Ok(ForkResult::Parent { child, .. }) => {
+            println!("Monitoring process PID: {}", child);
+            // Continue with main program logic...
+            // Example documents 
+            // let doc1 = Document::new("doc1", DocumentFormat::PlainText("Rust is a systems programming language.".into()));
+            // let doc2 = Document::new("doc2", DocumentFormat::PlainText("Search engines are essential for the web.".into()));
+            // let documents = vec![doc1, doc2];
 
-    // Collect the command-line arguments
-    let args: Vec<String> = env::args().collect();
+            // Collect the command-line arguments
+            let args: Vec<String> = env::args().collect();
 
-    if args.len() < 4 {
-        eprintln!("Usage: {} <documents_folder> <engine_mode> <mode>", args[0]);
-        eprintln!("Engine Modes: single_core_single_thread, multi_core_single_thread, multi_core_multiple_threads_each_thread_searching_against_whole_index, multi_core_multiple_threads_each_thread_in_each_core_searching_against_single_sharded_subset_of_index");
-        return;
-    }
+            if args.len() < 4 {
+                eprintln!("Usage: {} <documents_folder> <engine_mode> <mode>", args[0]);
+                eprintln!("Engine Modes: single_core_single_thread, multi_core_single_thread, multi_core_multiple_threads_each_thread_searching_against_whole_index, multi_core_multiple_threads_each_thread_in_each_core_searching_against_single_sharded_subset_of_index");
+                return;
+            }
 
-    
-    let documents_folder = &args[1];
 
-    let mode_str = &args[2];
-    let mode: EngineMode = match EngineMode::from_str(mode_str) {
-        Some(m) => m,
-        None => {
-            eprintln!("Invalid engine mode: {}", mode_str);
-            return;
-        }
-    };
+            let documents_folder = &args[1];
 
-    let run_mode = &args[3];
-    if run_mode != "testing" && run_mode != "production" {
-        eprintln!("Invalid mode: {}. Use 'testing' or 'production'.", run_mode);
-        return;
-    }
-
-    let mut documents = Vec::new();
-
-    for entry in fs::read_dir(documents_folder).expect("Failed to read documents directory") {
-        let entry = entry.expect("Failed to read directory entry");
-        let path = entry.path();
-
-        if path.is_file() {
-            let file_extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            // let file_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
-            let file_name_with_extension = path.file_name().and_then(|s| s.to_str()).unwrap_or("unknown"); // Include extension in the file name
-            let mut file_content = String::new();
-            let mut file = fs::File::open(&path).expect("Failed to open file");
-            file.read_to_string(&mut file_content).expect("Failed to read file");
-
-            let document_format: DocumentFormat = match file_extension {
-                "txt" => DocumentFormat::PlainText(file_content),
-                "json" => DocumentFormat::Json(file_content), // Store raw JSON string
-                "html" => DocumentFormat::Html(file_content),
-                _ => {
-                    println!("Skipping unsupported file type: {}", file_extension);
-                    continue;
+            let mode_str = &args[2];
+            let mode: EngineMode = match EngineMode::from_str(mode_str) {
+                Some(m) => m,
+                None => {
+                    eprintln!("Invalid engine mode: {}", mode_str);
+                    return;
                 }
             };
 
-            let document = Document::new(file_name_with_extension, document_format);
-            documents.push(document);
-        }
-    }
-
-    // Now you have all the documents read and parsed into the `documents` vector.
-    // You can proceed with creating the search index.
-
-    println!("Loaded {} documents", documents.len());
-
-    // Create a new query queue
-    let (query_tx, query_rx): (channel::Sender<QueryChannelSenderMessage>, channel::Receiver<QueryChannelSenderMessage>) = channel::unbounded();
-    let query_rx_clone: channel::Receiver<QueryChannelSenderMessage> = query_rx.clone();
-    let query_results = Arc::new(QueryResults::new());
-
-    if run_mode == "production" {
-        // Run the listen_for_user_queries function on a separate thread in production mode
-        let query_tx_clone: channel::Sender<QueryChannelSenderMessage> = query_tx.clone();
-        let query_results_clone = Arc::clone(&query_results);
-        thread::spawn(move || {
-            listen_for_user_queries(query_tx_clone, query_results_clone);
-        });
-    }
-
-     // Start the async server
-     let server_query_tx_clone: channel::Sender<QueryChannelSenderMessage> = query_tx.clone();
-     thread::spawn(move || {
-         tokio::runtime::Runtime::new().unwrap().block_on(server::run_query_requests_server(server_query_tx_clone)).unwrap();
-     });
-     let server_query_results_clone = Arc::clone(&query_results);
-     thread::spawn(move || {
-         tokio::runtime::Runtime::new().unwrap().block_on(server::run_get_results_server(server_query_results_clone)).unwrap();
-     });
-
-    let query_results_clone = Arc::clone(&query_results);
-    // let mode = EngineMode::SingleCoreSingleThread; // Set the desired mode here
-    let engine= Engine::new(mode);
-    let (tx_processors_shutdown, rx_processors_shutdown): (Sender<String>, Receiver<String>) = mpsc::channel();
-    let monitor = MONITOR.lock().unwrap();
-    monitor.start_monitoring();
-    std::mem::drop(monitor);
-    // The main thread can do other tasks, or join the spawned thread if necessary
-
-    let (tx_signal, rx_signal) = std::sync::mpsc::channel();
-    let signal_handler = Arc::new(Mutex::new(tx_signal));
-    let signal_handler_clone = signal_handler.clone();
-        // Spawn a thread to handle signals
-    thread::spawn(move || {
-        let mut signals = Signals::new(&[SIGINT, SIGTERM]).unwrap();
-        // Listen for SIGINT
-        for sig in signals.forever() {
-            match sig {
-                SIGINT => {
-                    println!("Received SIGINT, shutting down gracefully...");
-                    // Perform any cleanup or shutdown tasks here
-                    signal_handler_clone.lock().unwrap().send(()).unwrap();
-                    break;
-                }
-                SIGTERM => {
-                    println!("Received SIGTERM, shutting down gracefully...");
-                    signal_handler_clone.lock().unwrap().send(()).unwrap();
-                    break;
-                }
-                _ => unreachable!(),
+            let run_mode = &args[3];
+            if run_mode != "testing" && run_mode != "production" {
+                eprintln!("Invalid mode: {}. Use 'testing' or 'production'.", run_mode);
+                return;
             }
-            
+
+            let mut documents = Vec::new();
+
+            for entry in fs::read_dir(documents_folder).expect("Failed to read documents directory") {
+                let entry = entry.expect("Failed to read directory entry");
+                let path = entry.path();
+
+                if path.is_file() {
+                    let file_extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    // let file_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+                    let file_name_with_extension = path.file_name().and_then(|s| s.to_str()).unwrap_or("unknown"); // Include extension in the file name
+                    let mut file_content = String::new();
+                    let mut file = fs::File::open(&path).expect("Failed to open file");
+                    file.read_to_string(&mut file_content).expect("Failed to read file");
+
+                    let document_format: DocumentFormat = match file_extension {
+                        "txt" => DocumentFormat::PlainText(file_content),
+                        "json" => DocumentFormat::Json(file_content), // Store raw JSON string
+                        "html" => DocumentFormat::Html(file_content),
+                        _ => {
+                            println!("Skipping unsupported file type: {}", file_extension);
+                            continue;
+                        }
+                    };
+
+                    let document = Document::new(file_name_with_extension, document_format);
+                    documents.push(document);
+                }
+            }
+
+            // Now you have all the documents read and parsed into the `documents` vector.
+            // You can proceed with creating the search index.
+
+            println!("Loaded {} documents", documents.len());
+
+            // Create a new query queue
+            let (query_tx, query_rx): (channel::Sender<QueryChannelSenderMessage>, channel::Receiver<QueryChannelSenderMessage>) = channel::unbounded();
+            let query_rx_clone: channel::Receiver<QueryChannelSenderMessage> = query_rx.clone();
+            let query_results = Arc::new(QueryResults::new());
+
+            if run_mode == "production" {
+                // Run the listen_for_user_queries function on a separate thread in production mode
+                let query_tx_clone: channel::Sender<QueryChannelSenderMessage> = query_tx.clone();
+                let query_results_clone = Arc::clone(&query_results);
+                thread::spawn(move || {
+                    listen_for_user_queries(query_tx_clone, query_results_clone);
+                });
+            }
+
+                // Start the async server
+                let server_query_tx_clone: channel::Sender<QueryChannelSenderMessage> = query_tx.clone();
+                thread::spawn(move || {
+                    tokio::runtime::Runtime::new().unwrap().block_on(server::run_query_requests_server(server_query_tx_clone)).unwrap();
+                });
+                let server_query_results_clone = Arc::clone(&query_results);
+                thread::spawn(move || {
+                    tokio::runtime::Runtime::new().unwrap().block_on(server::run_get_results_server(server_query_results_clone)).unwrap();
+                });
+
+            let query_results_clone = Arc::clone(&query_results);
+            // let mode = EngineMode::SingleCoreSingleThread; // Set the desired mode here
+            let engine= Engine::new(mode);
+            let (tx_processors_shutdown, rx_processors_shutdown): (Sender<String>, Receiver<String>) = mpsc::channel();
+
+            // The main thread can do other tasks, or join the spawned thread if necessary
+
+            let (tx_signal, rx_signal) = std::sync::mpsc::channel();
+            let signal_handler = Arc::new(Mutex::new(tx_signal));
+            let signal_handler_clone = signal_handler.clone();
+                // Spawn a thread to handle signals
+            thread::spawn(move || {
+                let mut signals = Signals::new(&[SIGINT, SIGTERM]).unwrap();
+                // Listen for SIGINT
+                for sig in signals.forever() {
+                    match sig {
+                        SIGINT => {
+                            println!("Received SIGINT, shutting down gracefully...");
+                            // Perform any cleanup or shutdown tasks here
+                            kill(child, Signal::SIGTERM).unwrap();
+                            signal_handler_clone.lock().unwrap().send(()).unwrap();
+                            break;
+                        }
+                        SIGTERM => {
+                            println!("Received SIGTERM, shutting down gracefully...");
+                            kill(child, Signal::SIGTERM).unwrap();
+                            signal_handler_clone.lock().unwrap().send(()).unwrap();
+                            break;
+                        }
+                        _ => unreachable!(),
+                    }
+                    
+                }
+            });
+            let monitor_query_tx_clone:channel::Sender<QueryChannelSenderMessage> = query_tx.clone();
+            thread::spawn(move || {
+                // Wait for SIGINT signal
+                rx_signal.recv().unwrap();
+                // Shut down all processors
+                let monitor = MONITOR.lock().unwrap();
+                monitor.shutdown_all_processors(monitor_query_tx_clone);
+                match rx_processors_shutdown.recv() {
+                    Ok(message) => println!("{}", message),
+                    Err(e) => eprintln!("Failed to receive shutdown message: {}", e),
+                }
+            });
+            let monitor = MONITOR.lock().unwrap();
+            println!("Starting monitor...");
+            monitor.start_monitoring();
+            std::mem::drop(monitor);
+            println!("Starting Engine...");
+            println!("Do you wish to shut down? (Press Ctrl+C to exit or send SIGINT signal): ");
+            engine.start_engine(documents,query_rx_clone,query_results_clone,tx_processors_shutdown.clone());
+            // Wait for the child process to terminate
+            match waitpid(child, None) {
+                Ok(WaitStatus::Exited(pid, status)) => {
+                    println!("Child process (PID: {}) exited with status: {}", pid, status);
+                }
+                Ok(WaitStatus::Signaled(pid, signal, _)) => {
+                    println!("Child process (PID: {}) was terminated by signal: {:?}", pid, signal);
+                }
+                Ok(_) => {
+                    println!("Child process (PID: {}) had an unexpected status", child);
+                }
+                Err(e) => {
+                    eprintln!("Error waiting for child process: {}", e);
+                }
+            }
+            unsafe {
+                cleanup_shared_memory(SHM_PTR, SHM_SIZE, true); // unmap and unlink
+            }
+            println!("Search Engine Shutdown complete.");
+            exit(0); 
         }
-    });
-    let monitor_query_tx_clone:channel::Sender<QueryChannelSenderMessage> = query_tx.clone();
-    thread::spawn(move || {
-        // Wait for SIGINT signal
-        rx_signal.recv().unwrap();
-        // Shut down all processors
-        let monitor = MONITOR.lock().unwrap();
-        monitor.shutdown_all_processors(monitor_query_tx_clone);
-        match rx_processors_shutdown.recv() {
-            Ok(message) => println!("{}", message),
-            Err(e) => eprintln!("Failed to receive shutdown message: {}", e),
+        Ok(ForkResult::Child) => {
+            println!("Starting monitoring process...");
+            start_logging_monitor_info();
+            // Child cleans up shared memory
+            unsafe {
+                cleanup_shared_memory(SHM_PTR, SHM_SIZE, false); // Only unmap
+            }
+
+            // Exit child process
+            std::process::exit(0);
         }
-    });
-    println!("Starting Engine...");
-    println!("Do you wish to shut down? (Press Ctrl+C to exit or send SIGINT signal): ");
-    engine.start_engine(documents,query_rx_clone,query_results_clone,tx_processors_shutdown.clone());
-    println!("Search Engine Shutdown complete.");
+        Err(e) => {
+            eprintln!("Fork failed: {}", e);
+            exit(1);
+        }
+    }
+
 }

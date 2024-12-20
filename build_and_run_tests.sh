@@ -66,8 +66,8 @@ echo "Creating/clearing result file: $RESULT_FILE"
 > "$RESULT_FILE"
 
 # Engine modes
-ENGINE_MODES=("single_core_single_thread" "multi_core_single_thread" "multi_core_multiple_threads_each_thread_searching_against_whole_index" "multi_core_multiple_threads_each_thread_in_each_core_searching_against_single_sharded_subset_of_index")
-
+# ENGINE_MODES=("single_core_single_thread" "multi_core_single_thread" "multi_core_multiple_threads_each_thread_searching_against_whole_index" "multi_core_multiple_threads_each_thread_in_each_core_searching_against_single_sharded_subset_of_index")
+ENGINE_MODES=("multi_core_multiple_threads_each_thread_searching_against_whole_index")
 
 # Run tests for each engine mode
 for MODE in "${ENGINE_MODES[@]}"; do

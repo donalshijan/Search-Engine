@@ -7,10 +7,15 @@ use std::{sync::Arc, thread::ThreadId};
 use std::time::{Duration, Instant};
 use std::thread::{self};
 use core_affinity::CoreId;
+use crossbeam::epoch::is_pinned;
 use prettytable::{Cell, Row, Table};
 use search_engine::{Query,  QueryResult, QueryResults, SearchLibrary};
 use lazy_static::lazy_static;
 use crossbeam::channel;
+use libc::{shm_open, shm_unlink, mmap, munmap, O_CREAT, O_RDWR, MAP_SHARED, PROT_READ, PROT_WRITE};
+use std::ptr;
+use std::ffi::CString;
+use std::mem;
 use search_engine::QueryChannelSenderMessage;
 
 
@@ -18,15 +23,112 @@ use search_engine::QueryChannelSenderMessage;
 //     static ref PROCESSORS: Mutex<Vec<Arc<Processor>>> = Mutex::new(Vec::new());
 // }
 
+// const PROCESSOR_SIZE: usize = mem::size_of::<Processor>();  // Approximate size of Processor
+const MAX_PROCESSORS: usize = 16;  // Estimate how many processors you want to support
+// pub const SHM_SIZE: usize = mem::size_of::<Monitor>() + PROCESSOR_SIZE * MAX_PROCESSORS;
+// Shared memory constants
+pub const SHM_NAME: &str = "/monitor_shm";
+pub const SHM_SIZE: usize = mem::size_of::<MonitorLogInfo>();
+pub static mut SHM_PTR: *mut libc::c_void = ptr::null_mut();
+// Function to initialize shared memory
+pub fn initialize_shared_monitor() -> Arc<Mutex<&'static mut MonitorLogInfo>>  {
+    // Create a C string for the shared memory name
+    let shm_name = CString::new(SHM_NAME).expect("CString::new failed");
+
+    // Open or create shared memory object
+    let fd = unsafe {
+        shm_open(shm_name.as_ptr(), O_CREAT | O_RDWR, 0o600)
+    };
+
+    if fd == -1 {
+        panic!("Failed to open shared memory object");
+    }
+
+    // Set the size of the shared memory object
+    unsafe {
+        libc::ftruncate(fd, SHM_SIZE as i64);
+    }
+
+    // Map the shared memory object to the address space
+    let ptr = unsafe {
+        mmap(
+            ptr::null_mut(),
+            SHM_SIZE,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+
+    if ptr == libc::MAP_FAILED {
+        panic!("Failed to map shared memory");
+    }
+
+    // Store the pointer in the global static
+    unsafe {
+        SHM_PTR = ptr;
+    }
+    // Cast the pointer to a mutable Monitor struct
+    let monitor_ptr = ptr as *mut MonitorLogInfo;
+
+    // Initialize the shared memory if we're the creator
+    const DEFAULT_PROCESSOR: Option<ProcessorLogInfo> = None;
+    unsafe {
+        std::ptr::write(monitor_ptr, 
+            MonitorLogInfo {
+                processors: [DEFAULT_PROCESSOR; MAX_PROCESSORS],
+                is_alive: true,
+            }
+        );
+    }
+
+    // Close the file descriptor (it is no longer needed after mapping)
+    unsafe {
+        libc::close(fd);
+    }
+
+    // Return a wrapped shared memory Monitor pointer in a Mutex and Arc for safe sharing
+     Arc::new(Mutex::new(unsafe { &mut *monitor_ptr }))
+}
+
+// Function to clean up shared memory
+pub fn cleanup_shared_memory(shm_ptr: *mut libc::c_void, shm_size: usize, unlink: bool) {
+    // Unmap the shared memory region
+    unsafe {
+        if shm_ptr != ptr::null_mut() {
+            if munmap(shm_ptr, shm_size) != 0 {
+                eprintln!("Failed to unmap shared memory");
+            }
+        }
+    }
+
+    // Unlink the shared memory object if requested
+    if unlink {
+        let shm_name = CString::new(SHM_NAME).expect("CString::new failed");
+        unsafe {
+            if shm_unlink(shm_name.as_ptr()) != 0 {
+                eprintln!("Failed to unlink shared memory object");
+            }
+        }
+    }
+}
+
 lazy_static! {
     pub static ref MONITOR: Arc<Mutex<Monitor>> = Arc::new(Mutex::new(Monitor {
         processors: Vec::new(),
+        is_alive: Arc::new(AtomicBool::new(true))
     }));
 }
 
 struct ThreadData {
     thread_no: usize,
     handle: thread::JoinHandle<ThreadId>,
+}
+
+pub struct MonitorLogInfo {
+    pub processors: [Option<ProcessorLogInfo>; MAX_PROCESSORS], // Fixed-size array
+    pub is_alive: bool,                   
 }
 
 #[derive(Clone)]
@@ -41,6 +143,13 @@ pub struct Processor{
     is_alive: Arc<AtomicBool>,
 }
 
+#[derive(Clone,Debug)]
+struct ProcessorLogInfo{
+    id: usize,
+    core_ids: String,
+    thread_ids: String,
+    is_alive: bool
+}
 
 #[derive(Clone,Debug)]
 enum ProcessorMessage {
@@ -389,11 +498,13 @@ impl Processor{
 
 pub struct Monitor {
     processors: Vec<Arc<Processor>>,
+    is_alive: Arc<AtomicBool>,
 }
 
 impl Monitor {
     pub fn add_processor(&mut self, processor: Arc<Processor>) {
         self.processors.push(processor);
+        println!("push successful");
     }
     
     pub fn kill_processor(&self, processor_id: usize) {
@@ -427,101 +538,158 @@ impl Monitor {
         }
         // Wait a moment to ensure all processors stop
         thread::sleep(Duration::from_millis(100));
+        let is_alive_status = self.is_alive.clone();
+        is_alive_status.store(false, Ordering::SeqCst);
     }
 
-    pub fn start_monitoring(&self) {
-        thread::spawn(move || {
-            loop {
-                // Access MONITOR singleton directly within the loop
-                let monitor = MONITOR.lock().unwrap();
-                let processors = monitor.processors.clone();
-                std::mem::drop(monitor);
-                {
-                    // Acquire a write lock to modify the processors list
-                    let mut processors = processors.clone();
-                    
-                    // Retain only those processors that are alive
-                    processors.retain(|processor| processor.is_alive());
-                }
-                let mut table = Table::new();
-                
-                // Header for the table
-                table.add_row(Row::new(vec![
-                    Cell::new("Type"),
-                    Cell::new("Id"),
-                    // Cell::new("CPU Usage (%)"),
-                    // Cell::new("Memory Usage (bytes)"),
-                    Cell::new("Processor No./No.s"),
-                ]));
-                
-                // Group processors by core
-                let mut core_data: HashMap<CoreId, Vec<Arc<Processor>>> = HashMap::new();
-                for processor in &processors {
-                        // one more loop on core_ids
-                    for core_id in processor.core_ids.read().unwrap().clone(){
-                        core_data.entry(core_id.clone())
-                        .or_insert_with(Vec::new)
-                        .push(Arc::clone(processor));
-                    }
-                    
-                }
-
-                // Sort and display core and thread information
-                for (core_id, processors_in_core) in core_data {
-                    // Core information (aggregated CPU and memory usage for all threads on this core)
-                    // let core_cpu_usage: f64 = processors_in_core.iter().map(|p| p.cpu_usage()).sum();
-                    // let core_memory_usage: usize = processors_in_core.iter().map(|p| p.memory_usage()).sum();
-                    // let mut processor_threads: Vec<ThreadId> = Vec::new();
-                    // for processor in processors_in_core.clone() {
-                    //     for thread_id in processor.thread_ids.read().unwrap().clone(){
-                    //         processor_threads.push(thread_id);
-                    //     }
-                    // }
-                    // let core_cpu_usage: f64 = cpu_usage(processor_threads.clone());
-                    // let core_memory_usage: usize = memory_usage(processor_threads);
-                    let processor_ids: String = processors_in_core
-                    .iter()                                 
-                    .map(|processor| processor.id.to_string()) 
-                    .collect::<Vec<String>>()               
-                    .join(","); 
-                    // Add core row to table
-                    table.add_row(Row::new(vec![
-                        Cell::new("Core"),
-                        Cell::new(&core_id_to_string(core_id)),
-                        // Cell::new(&format!("{:.2}", core_cpu_usage)),
-                        // Cell::new(&core_memory_usage.to_string()),
-                        Cell::new(&processor_ids),
-                    ]));
-                    
-                    // Add thread rows associated with this core
-                    for processor in processors_in_core {
-                        for thread_id in processor.thread_ids.read().unwrap().clone(){
-                            table.add_row(Row::new(vec![
-                                Cell::new("Thread"),
-                                Cell::new(&thread_id_to_string(thread_id.clone())),
-                                // Cell::new(&format!("{:.2}", cpu_usage(vec![thread_id]))),
-                                // Cell::new(&memory_usage(vec![thread_id]).to_string()),
-                                Cell::new(&processor.id.to_string())
-                            ]));
-                        }
-                        
-                    }
-                }
-
-                // Clear the terminal screen and print the table at the bottom
-                print!("\x1B[2J\x1B[1;1H"); // Clear the screen
-                table.printstd();
-
-                // Sleep before the next update
-                thread::sleep(Duration::from_secs(5));
+   pub fn start_monitoring(&self) {
+    thread::spawn(move || {
+        loop {
+            // Retrieve the current monitor instance
+            let monitor = MONITOR.lock().unwrap();
+            let processors = monitor.processors.clone(); // Clone the Arc references
+            let is_alive_status = monitor.is_alive.clone(); // Clone the Arc reference
+            drop(monitor); // Release the lock early
+            if !is_alive_status.load(Ordering::SeqCst){
+                break;
             }
-        });
-    }
+            // Access the shared memory MonitorLogInfo instance
+            let monitor_log_info = unsafe { &mut *(SHM_PTR as *mut MonitorLogInfo) };
+
+            // Update the shared memory MonitorLogInfo
+            unsafe {
+                for (i, processor) in processors.iter().enumerate() {
+                    if i < MAX_PROCESSORS {
+                        let id = processor.id;
+                        let core_ids = processor
+                            .core_ids
+                            .read()
+                            .unwrap()
+                            .iter()
+                            .map(|core_id| core_id.id.to_string())
+                            .collect::<Vec<String>>()
+                            .join(",");
+                        let thread_ids = processor
+                            .thread_ids
+                            .read()
+                            .unwrap()
+                            .iter()
+                            .map(|thread_id| format!("{:?}", thread_id))
+                            .collect::<Vec<String>>()
+                            .join(",");
+                        let is_alive = processor.is_alive.load(Ordering::SeqCst);
+                        let processor_log_info = ProcessorLogInfo{
+                            id,
+                            core_ids,
+                            thread_ids,
+                            is_alive,
+                        };
+                        monitor_log_info.processors[i] = Some(processor_log_info)
+                    }
+                }
+                monitor_log_info.is_alive = is_alive_status.load(Ordering::SeqCst);
+            }
+
+            // Sleep before the next update
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+}
 }
 
 fn add_new_processor(processor: Arc<Processor>) {
     let mut monitor = MONITOR.lock().unwrap();
     monitor.add_processor(processor);
+    println!("added processor");
+}
+
+pub fn start_logging_monitor_info(){
+    loop{
+
+        // Access the shared memory MonitorLogInfo instance
+        let monitor_log_info = unsafe { &*(SHM_PTR as *mut MonitorLogInfo) };
+        if !monitor_log_info.is_alive {
+            break;
+        }
+        let mut table = Table::new();
+
+        // Header for the table
+        table.add_row(Row::new(vec![
+            Cell::new("Type"),
+            Cell::new("Id"),
+            // Cell::new("CPU Usage (%)"),
+            // Cell::new("Memory Usage (bytes)"),
+            Cell::new("Processor No./No.s"),
+        ]));
+
+        // Group processors by core
+        let mut core_data: HashMap<String, Vec<ProcessorLogInfo>> = HashMap::new();
+
+         // Populate core_data with ProcessorLogInfo
+         for processor_option in monitor_log_info.processors.iter() {
+            if let Some(processor) = processor_option {
+                println!("processor option value:{:?}",processor);
+                for core_id in processor.core_ids.split(',') {
+                    let core_id = core_id.trim().to_string();
+                    println!("coreid::::{}",core_id);
+                    core_data
+                        .entry(core_id)
+                        .or_insert_with(Vec::new)
+                        .push((*processor).clone());
+                }
+            }
+        }
+
+        // Sort and display core and thread information
+        for (core_id, processors_in_core) in core_data {
+            // Core information (aggregated CPU and memory usage for all threads on this core)
+            // let core_cpu_usage: f64 = processors_in_core.iter().map(|p| p.cpu_usage()).sum();
+            // let core_memory_usage: usize = processors_in_core.iter().map(|p| p.memory_usage()).sum();
+            // let mut processor_threads: Vec<ThreadId> = Vec::new();
+            // for processor in processors_in_core.clone() {
+            //     for thread_id in processor.thread_ids.read().unwrap().clone(){
+            //         processor_threads.push(thread_id);
+            //     }
+            // }
+            // let core_cpu_usage: f64 = cpu_usage(processor_threads.clone());
+            // let core_memory_usage: usize = memory_usage(processor_threads);
+            let processor_ids: String = processors_in_core
+                .iter()
+                .map(|processor| processor.id.to_string())
+                .collect::<Vec<String>>()
+                .join(",");
+
+            // Add core row to table
+            table.add_row(Row::new(vec![
+                Cell::new("Core"),
+                Cell::new(&core_id),
+                // Cell::new(&format!("{:.2}", core_cpu_usage)),
+                // Cell::new(&core_memory_usage.to_string()),
+                Cell::new(&processor_ids),
+            ]));
+
+            // Add thread rows associated with this core
+            for processor in processors_in_core {
+                for thread_id in processor.thread_ids.split(',') {
+                    table.add_row(Row::new(vec![
+                        Cell::new("Thread"),
+                        Cell::new(&thread_id),
+                        // Cell::new(&format!("{:.2}", cpu_usage(vec![thread_id]))),
+                        // Cell::new(&memory_usage(vec![thread_id]).to_string()),
+                        Cell::new(&processor.id.to_string()),
+                    ]));
+                }
+            }
+        }
+
+        // Clear the terminal screen and print the table at the bottom
+        print!("\x1B[2J\x1B[1;1H"); // Clear the screen
+        table.printstd();
+
+        // Sleep before the next display update
+        thread::sleep(Duration::from_millis(1000));
+
+    }
 }
 
 // Example method to get memory usage
