@@ -511,9 +511,10 @@ impl Monitor {
                 // Clear the terminal screen and print the table at the bottom
                 print!("\x1B[2J\x1B[1;1H"); // Clear the screen
                 table.printstd();
-
+                println!("Do you wish to shut down? (Press Ctrl+C to exit or send SIGINT signal): ");
+                println!("\nEnter your query: ");
                 // Sleep before the next update
-                thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(10));
             }
         });
     }
