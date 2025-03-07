@@ -1,5 +1,6 @@
 
-use std::{collections::HashMap, vec};
+use std::{collections::HashMap,collections::HashSet,collections::BinaryHeap, vec};
+use std::cmp::Reverse;
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde_json::Value;
@@ -135,6 +136,50 @@ impl Document {
                 _ => {}
             }
         }
+}
+
+pub struct LRUCache {
+    capacity: usize,
+    cache: HashMap<String, Vec<(String, i32)>>, // (query_string -> results)
+    order: VecDeque<String>, // Keeps track of the LRU order
+}
+
+impl LRUCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            cache: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    pub fn get(&mut self, query: &str) -> Option<Vec<(String, i32)>> {
+        if let Some(results) = self.cache.get_mut(query) {
+            // Move the query to the back to mark it as recently used
+            self.order.retain(|q| q != query);
+            self.order.push_back(query.to_string());
+            return Some(results.clone());
+        }
+        None
+    }
+
+    pub fn put(&mut self, query: String, results: Vec<(String, i32)>) {
+        if self.cache.contains_key(&query) {
+            self.order.retain(|q| q != &query);
+        } else if self.cache.len() >= self.capacity {
+            // Evict the least recently used item
+            if let Some(lru_query) = self.order.pop_front() {
+                self.cache.remove(&lru_query);
+            }
+        }
+        self.order.push_back(query.clone());
+        self.cache.insert(query, results);
+    }
+}
+
+
+lazy_static! {
+    pub static ref LRU_CACHE: Mutex<LRUCache> = Mutex::new(LRUCache::new(10));
 }
 
 impl Query {
@@ -340,19 +385,93 @@ impl QueryResults {
 
 pub struct SearchLibrary {
     pub index: HashMap<String, Vec<String>>,
+    // Define stopword categories
+    articles: HashSet<String>,
+    prepositions_conjunctions: HashSet<String>,
+    determiners_pronouns: HashSet<String>,
+    auxiliary_verbs: HashSet<String>,
+    common_adverbs: HashSet<String>,
 }
 
 impl SearchLibrary {
     pub fn new() -> Self {
         Self {
             index: HashMap::new(),
+            articles: Self::init_articles(),
+            prepositions_conjunctions: Self::init_prepositions_conjunctions(),
+            determiners_pronouns: Self::init_determiners_pronouns(),
+            auxiliary_verbs: Self::init_auxiliary_verbs(),
+            common_adverbs: Self::init_common_adverbs(),
         }
     }
 
     pub fn create_index_from_existing_index(existing_index: HashMap<String, Vec<String>>) -> Self {
         Self {
             index: existing_index,
+            articles: Self::init_articles(),
+            prepositions_conjunctions: Self::init_prepositions_conjunctions(),
+            determiners_pronouns: Self::init_determiners_pronouns(),
+            auxiliary_verbs: Self::init_auxiliary_verbs(),
+            common_adverbs: Self::init_common_adverbs(),
         }
+    }
+
+    fn init_articles() -> HashSet<String> {
+        ["a", "an", "the"].iter().map(|s| s.to_string()).collect()
+    }
+
+    fn init_prepositions_conjunctions() -> HashSet<String> {
+        [
+            "in", "on", "at", "by", "with", "about", "against", "between", "into", "through",
+            "during", "before", "after", "above", "below", "to", "from", "up", "down", "and",
+            "or", "but", "as", "because", "since", "if", "though", "although", "unless",
+            "while", "whereas", "whether", "so", "yet", "for", "nor",
+            "like", "such", "despite", "amidst", "within", "without", "upon",
+            "beyond", "among", "along", "via", "concerning", "towards", "underneath"
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    fn init_determiners_pronouns() -> HashSet<String> {
+        [
+            "the", "a", "an", "this", "that", "these", "those", "my", "your", "his", "her",
+            "its", "our", "their", "whose", "some", "any", "each", "every", "either", "neither",
+            "no", "none", "all", "both", "many", "most", "several", "few", "one", "two",
+            "first", "second", "third", "it", "he", "she", "we", "they", "you",
+            "those", "their", "his", "its", "who", "what", "whom",
+            "which", "whichever", "whomever", "whosever", "anybody", "somebody", "everybody"
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    fn init_auxiliary_verbs() -> HashSet<String> {
+        [
+            "be", "am", "is", "are", "was", "were", "being", "been", "have", "has", "had",
+            "do", "does", "did", "shall", "will", "should", "would", "may", "might", "must",
+            "can", "could",
+            "shall", "will", "does", "did",
+            "ought", "dare", "need"
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    fn init_common_adverbs() -> HashSet<String> {
+        [
+            "very", "too", "quite", "rather", "almost", "so", "just", "even", "only", "also",
+            "always", "never", "sometimes", "often", "usually", "seldom", "rarely", "ever",
+            "however", "therefore", "thus", "more", "less",
+            "often", "sometimes", "always", "never", "even", "still",
+            "perhaps", "maybe", "surely", "truly", "undoubtedly"
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
     pub fn add_document_to_index(&mut self, document: &Document) {
@@ -373,40 +492,97 @@ impl SearchLibrary {
     // Method to search the query in a subset of the search library index specified by shard_range if not specified then search is carried in the whole index
     pub fn search(&self, query: &Query, shard_range: Option<&[String]>) -> QueryResult {
         let mut query = query.clone();
+        // Check the cache
+        if let Some(cached_result) = LRU_CACHE.lock().unwrap().get(query.query_string.as_str()){
+            println!("Cache Hit for query");
+
+            let current_time = SystemTime::now();
+            let duration_since_query_arrival = current_time
+                .duration_since(query.query_arrival_time)
+                .unwrap_or_else(|_| Duration::from_secs(0));
+            return QueryResult::new(query.id.clone(), query.query_string.clone(), cached_result, duration_since_query_arrival);
+        }
         let tokens: Vec<String> = query.tokenize_query();
         let mut result_docs = HashMap::new();
+        let mut heap = BinaryHeap::new();
+        
+        let mut word_counts: HashMap<(&String, String), i32> = HashMap::new(); // (doc_id, token) -> count
 
         for token in tokens {
             // Determine whether to search the full index or a subset (shard)
-            if let Some(keys_subset) = shard_range {
-                // Search only within the specified subset of keys
+            let search_docs = if let Some(keys_subset) = shard_range {
                 if keys_subset.contains(&token) {
-                    if let Some(docs) = self.index.get(&token) {
-                        for doc_id in docs {
-                            *result_docs.entry(doc_id.clone()).or_insert(0) += 1;
-                        }
-                    }
+                    self.index.get(&token)
+                } else {
+                    None
                 }
             } else {
-                // Search the entire index
-                if let Some(docs) = self.index.get(&token) {
-                    for doc_id in docs {
-                        *result_docs.entry(doc_id.clone()).or_insert(0) += 1;
+                self.index.get(&token)
+            };
+            
+            if let Some(docs) = search_docs {
+                for doc_id in docs {
+                    let entry = result_docs.entry(doc_id.clone()).or_insert(0);
+                    let count = word_counts.entry((doc_id, token.to_owned())).or_insert(0);
+
+                    if self.articles.contains(token.as_str()) {
+                        // Add 1 only once per document
+                        if *count == 0 {
+                            *entry += 1;
+                        }
+                    } else if self.prepositions_conjunctions.contains(token.as_str()) {
+                        // Add 1 up to 2 times
+                        if *count < 2 {
+                            *entry += 1;
+                        }
+                    } else if self.determiners_pronouns.contains(token.as_str()){
+                        // Add 2 up to 2 times
+                        if *count < 2 {
+                            *entry += 2;
+                        }
+                    } 
+                    else if self.auxiliary_verbs.contains(token.as_str()){
+                        // Add 2 up to 1 times
+                        if *count < 1 {
+                            *entry += 2;
+                        }
                     }
+                    else if self.common_adverbs.contains(token.as_str()){
+                        // Add 2 up to 2 times
+                        if *count < 2 {
+                            *entry += 2;
+                        }
+                    }  else {
+                        // Default full weight
+                        if *count < 3{
+                            *entry += 6;
+                        }
+                    }
+                    
+                    *count += 1; // Track occurrences
                 }
             }
         }
 
-        // Sort documents by relevance (frequency of matching tokens)
-        let mut sorted_docs: Vec<_> = result_docs.into_iter().collect();
-        if let None = shard_range {
-            sorted_docs.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency descending
+        // Step 2: Push results into a max-heap
+        for (doc_id, count) in result_docs {
+            heap.push(Reverse((count, doc_id))); // Reverse to make it a min-heap
         }
+
+        // Step 3: Extract results in sorted order
+        // Sort documents by relevance (frequency of matching tokens)
+        let sorted_docs: Vec<_> = heap.into_sorted_vec()
+        .into_iter()
+        .map(|Reverse((count, doc_id))| (doc_id, count)) // Unwrapping Reverse
+        .collect();
+    
         let current_time = SystemTime::now();
         // println!("current time {:?}", current_time);
         let duration_since_query_arrival = current_time
             .duration_since(query.query_arrival_time)
             .unwrap_or_else(|_| Duration::from_secs(0));
+        // Store result in cache
+        LRU_CACHE.lock().unwrap().put(query.query_string.clone(), sorted_docs.clone());
         QueryResult::new(query.id.clone(), query.query_string.clone(), sorted_docs, duration_since_query_arrival)
     }
 }
