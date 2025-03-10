@@ -19,3 +19,4 @@ signal = "0.7"
 prettytable = "0.10"
 signal-hook = "0.3"
 indicatif = "0.17"
+rand = { version = "0.9.0", features = ["std"] }

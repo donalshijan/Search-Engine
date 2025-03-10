@@ -9,6 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use serde_json::Value;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Serialize, Deserialize};
+use rand::seq::IteratorRandom;
+use rand::rng;
 
 #[derive(Serialize, Deserialize)]
 struct QueryRequest {
@@ -16,24 +18,32 @@ struct QueryRequest {
 }
 
 async  fn test_query_performance() -> Result<(), Box<dyn std::error::Error>> {
+    const NUM_QUERIES: usize = 500; // Set number of queries to be made
     // Open the queries.txt file
     let file = File::open("queries.txt")?;
     let reader = BufReader::new(file);
     
     let mut query_ids = VecDeque::new(); // To store query IDs
-    let mut queries: HashMap<String,i32> = HashMap::new(); // To store query_id -> query_no mapping
+    let mut queries: HashMap<String,i32> = HashMap::new(); // To store query_req_id -> query_no mapping
     let mut total_accuracy = 0.0;   // To store the cumulative accuracy
-    let mut last_query_no = 0;      // Keep track of the previous query number
     let mut total_processing_time = 0.0;
     let mut query_count = 0;
 
-    // Read all lines to determine total queries for the progress bar
-    let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
-    let total_queries = lines.len();
+    let mut query_to_queryno_map = HashMap::new(); // To store query -> query_no mapping
+    
+    for (line_no, line) in reader.lines().enumerate() {
+        if let Ok(query) = line {
+            query_to_queryno_map.insert(query, line_no+1);
+        }
+    }
+
+
+    let mut rng = rng();
+    let selected_queries: Vec<String> = (0..NUM_QUERIES).map(|_| query_to_queryno_map.keys().choose(&mut rng).unwrap().to_string()).collect();
     
     // Initialize progress bars
-    let request_progress = ProgressBar::new(total_queries as u64);
-    let response_progress = ProgressBar::new(total_queries as u64);
+    let request_progress = ProgressBar::new(NUM_QUERIES as u64);
+    let response_progress = ProgressBar::new(NUM_QUERIES as u64);
 
     request_progress.set_style(
         ProgressStyle::default_bar()
@@ -54,10 +64,12 @@ async  fn test_query_performance() -> Result<(), Box<dyn std::error::Error>> {
     let mut log_writer = BufWriter::new(log_file);
     println!("Making query requests");
     // Loop to send each query
-    for query in lines {
+    for query in selected_queries {
+        // println!("\nquery:{query}\n");
         // Create a TcpStream to connect to the server (sending query)
         let mut stream = TcpStream::connect("127.0.0.1:8080").await?;
         // Send the query directly
+        let query_clone= query.clone();
         let query_json = serde_json::to_string(&QueryRequest { query }).unwrap();
         stream.write_all(query_json.as_bytes()).await?;
         // Read the response
@@ -67,13 +79,17 @@ async  fn test_query_performance() -> Result<(), Box<dyn std::error::Error>> {
         // Deserialize the response to extract `query_id`
         let response_value: Value = serde_json::from_slice(response_json)?;
         if let Some(query_id) = response_value["query_id"].as_str() {
-            let query_no = if (last_query_no + 1) % 10 == 0 {
-                10
+            // let query_no = if (last_query_no + 1) % 10 == 0 {
+            //     10
+            // } else {
+            //     (last_query_no + 1) % 10
+            // };
+            // last_query_no = query_no;
+            let query_no: i32 = if let Some(&no) = query_to_queryno_map.get(query_clone.as_str()) {
+                no as i32
             } else {
-                (last_query_no + 1) % 10
+                -1 // Or any other default value you want
             };
-            last_query_no = query_no;
-
             queries.insert(query_id.to_string(), query_no);
             query_ids.push_back(query_id.to_string());
         }
