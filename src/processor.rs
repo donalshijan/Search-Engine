@@ -4,11 +4,11 @@ use std::{panic, usize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Barrier, Condvar, Mutex, RwLock};
 use std::{sync::Arc, thread::ThreadId};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::thread::{self};
 use core_affinity::CoreId;
 use prettytable::{Cell, Row, Table};
-use search_engine::{Query,  QueryResult, QueryResults, SearchLibrary};
+use search_engine::{Query,  QueryResult, QueryResults, SearchLibrary,LRU_CACHE};
 use lazy_static::lazy_static;
 use crossbeam::channel;
 use search_engine::QueryChannelSenderMessage;
@@ -220,8 +220,10 @@ impl Processor{
                                     std::mem::drop(old_result);
                                     barrier_clone.wait(); // Wait for all threads to finish processing
                                     {
-                                        // clear the recently processed and final aggregated result held in the shared QueryResult instance so that it can be used for processing other queries later
                                         let mut old_result = result_store_clone.lock().unwrap();
+                                        // Store result in cache
+                                        LRU_CACHE.lock().unwrap().put(query.query_string.clone(), old_result.documents.clone());
+                                        // clear the recently processed and final aggregated result held in the shared QueryResult instance so that it can be used for processing other queries later
                                         old_result.query_id.clear();
                                     }
                                 }
@@ -304,10 +306,22 @@ impl Processor{
         let query_rx_clone =  self.query_rx.clone();
         let  last_heartbeat = self.last_heartbeat.clone();
         let  is_alive = self.is_alive.clone();
+        let query_results_clone = self.query_results.clone();
         loop {
             let result = {
                 match query_rx_clone.recv() {
                     Ok(QueryChannelSenderMessage::Query(query)) => {
+                        let query_clone= query.clone();
+                        // Check the cache first
+                        if let Some(cached_result) = LRU_CACHE.lock().unwrap().get(query_clone.query_string.as_str()){
+                            println!("Cache Hit for query");
+                            let current_time = SystemTime::now();
+                            let duration_since_query_arrival = current_time
+                                .duration_since(query_clone.query_arrival_time)
+                                .unwrap_or_else(|_| Duration::from_secs(0));
+                            query_results_clone.insert(query_clone.id.clone(), QueryResult::new(query_clone.id.clone(), query_clone.query_string.clone(), cached_result, duration_since_query_arrival));
+                            continue;
+                        }
                         let (lock, cvar) = &*current_processor_message_item;
                         let mut current_processor_message_item_option = lock.lock().unwrap();
                         *current_processor_message_item_option = Some(ProcessorMessage::Query(Some(query)));

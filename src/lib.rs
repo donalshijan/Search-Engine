@@ -179,7 +179,7 @@ impl LRUCache {
 
 
 lazy_static! {
-    pub static ref LRU_CACHE: Mutex<LRUCache> = Mutex::new(LRUCache::new(10));
+    pub static ref LRU_CACHE: Mutex<LRUCache> = Mutex::new(LRUCache::new(5));
 }
 
 impl Query {
@@ -492,16 +492,19 @@ impl SearchLibrary {
     // Method to search the query in a subset of the search library index specified by shard_range if not specified then search is carried in the whole index
     pub fn search(&self, query: &Query, shard_range: Option<&[String]>) -> QueryResult {
         let mut query = query.clone();
-        // Check the cache
-        if let Some(cached_result) = LRU_CACHE.lock().unwrap().get(query.query_string.as_str()){
-            println!("Cache Hit for query");
-
-            let current_time = SystemTime::now();
-            let duration_since_query_arrival = current_time
-                .duration_since(query.query_arrival_time)
-                .unwrap_or_else(|_| Duration::from_secs(0));
-            return QueryResult::new(query.id.clone(), query.query_string.clone(), cached_result, duration_since_query_arrival);
+        if let None = shard_range {
+            // Check the cache first
+            if let Some(cached_result) = LRU_CACHE.lock().unwrap().get(query.query_string.as_str()){
+                println!("Cache Hit for query");
+    
+                let current_time = SystemTime::now();
+                let duration_since_query_arrival = current_time
+                    .duration_since(query.query_arrival_time)
+                    .unwrap_or_else(|_| Duration::from_secs(0));
+                return QueryResult::new(query.id.clone(), query.query_string.clone(), cached_result, duration_since_query_arrival);
+            }
         }
+        
         let tokens: Vec<String> = query.tokenize_query();
         let mut result_docs = HashMap::new();
         let mut heap = BinaryHeap::new();
@@ -581,8 +584,10 @@ impl SearchLibrary {
         let duration_since_query_arrival = current_time
             .duration_since(query.query_arrival_time)
             .unwrap_or_else(|_| Duration::from_secs(0));
-        // Store result in cache
-        LRU_CACHE.lock().unwrap().put(query.query_string.clone(), sorted_docs.clone());
+        if let None = shard_range {
+            // Store result in cache
+            LRU_CACHE.lock().unwrap().put(query.query_string.clone(), sorted_docs.clone());
+        }
         QueryResult::new(query.id.clone(), query.query_string.clone(), sorted_docs, duration_since_query_arrival)
     }
 }
