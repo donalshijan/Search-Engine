@@ -1,14 +1,14 @@
 # Project Overview
-This is a search engine application, written in rust taking most advantage of it's memory safety and thread level and process level concurrency by leveraging it's high level primitives and low level primitives for concurrency along with some atomics.
+This is a search engine application, written in rust taking most advantage of it's memory safety and thread level and process level concurrency by leveraging it's high level and low level primitives for concurrency along with some atomics.
 The program when run will first instantiate a Search engine instance, all throughout the code it is referred simply as engine, which will construct a Library, more appropriately a search library by using a bunch of documents specified in the documents folder at project root. The search library struct contains a field called index, as each document gets added to the search library, what actually happens is, first tokenize method gets called on the document to generate tokens for every word in the document , and these generated tokens become keys for the index and the document id of that document will be pushed to the corresponding vector mapped to those keys. So index is more like a `Hashmap<token=>Vector[document_id]>`
 This Index is used to search for queries and produce results.
 
 Search engine can operate on different modes or configurations so to say, which we do have to specify when we run the program as command line argument and it is used when engine instance is instantiated.
 
 The searching algorithm is as follows, we tokenize the query string and for each token generated we will look up the document ids vector in the search library index using that token as key and construct a new hashmap for storing the query result  `HashMap<document_id=>relevance_score>`, all the document ids looked up from the index using the query token as key is inserted into the hashmap, if it is the first entry in the hashmap it gets a relevance score of 1, if not it gets updated to current score +1. After all the query tokens are processed in that manner, we will take the final result hashmap and take every key value entry in that map and construct a tuple of it and push it into a vector , and then we will sort that vector in descending order of second item in each tuple which is the relevance score. That basically generates a vector of tuples containing document ids and their respective relevance score(`Vec[(document_id,score)]`) from hightest to lowest order. This is the final result of the search query, it tells us which documents are most likely to be the ones containing relevant information about our query, and we can open and look up those documents using the document ids in the result. 
-Every document's file name without the extension is used as the document's id.
+Every document's file name with the extension is used as the document's id.
 
-Project also implements a monitoring service which will monitor each search processor and all the cores and threads it's assigned to, it can futher be extended to calculate memory usage and CPU usage for each core and thread but since it would rely on OS platform specific filesystem and APIs it has been left open for implementation by the user, but some skeletal code has been retained in comments.
+Project also implements a monitoring service which will monitor each search processor and all the cores and threads it's assigned to, it can futher be extended to calculate memory usage and CPU usage for each core and thread but since it would rely on OS platform specific filesystem and APIs, so it has been left open for implementation by the user, but some skeletal code has been retained in comments.
 
 Shutdown and thread terminations are handled gracefully.
 
@@ -25,12 +25,12 @@ Just as discussed above, it creates an index using all documents provided and al
 Uses a multi producer multi consumer channel form crossbeam crate, which allows the queries to be pushed to channel when recieved by the server first and then pulled and processed by different processor components in parallel (or not) depending on the set mode of operation for the engine.
 
 ### Query Results 
-As each query gets processed it's results are stored in a hashmap wrapped in `Arc<Mutext<HashMap<Query_id=>Result>>>`, the client is expected to keep polling with the query_id from the original search request response until the server endpoint at localhost 8081 can finally pull that respective result from the QueryResults hashmap when it is finally available.
+As each query gets processed it's results are stored in a hashmap wrapped in `Arc<Mutex<HashMap<Query_id=>Result>>>`, the client is expected to keep polling with the query_id from the original search request response until the server endpoint at localhost 8081 can finally pull that respective result from the QueryResults hashmap when it is finally available.
 
 ### Processor
 This is the component which processes the query and produces the results, the engine mode configuration we specify when setting up the engine, directly applies to the way this component's internal architecture will be set up to process queries in the overall system. Depending on the different modes of operation available for configuration, this component's architecture differs internally and the way it handles the processing of the queries both in terms of how many queries get processed in parallel, and how fast each can get processed, also differs.
 
-Different engine mode configuration options available, and how it affects the processing of the queries by the processor component is discussed here:
+Different engine mode configuration options, and how it affects the processing of the queries by the processor component is discussed here:
 
 #### Modes
 ##### Single Core Single Thread
@@ -103,7 +103,7 @@ To run the test program
 cargo run --bin test
 ```
 # Build and Run Test
-I have also written a shell script which will build and run the project in all modes and run the same performance test program in each of those modes and calculate average processing time for processing x amount of queries in each mode and log the result to results.txt 
+I have also written a shell script which will build and run the project in all modes and run the same performance test program in each of those modes and calculate average processing time for processing x amount of queries in each mode and log the result to results.txt.
 
 To run the script 
 
@@ -111,6 +111,14 @@ To run the script
 chmod +x build_and_run_tests.sh
 ./build_and_run_tests.sh
 ```
+
+To simply build and run the program and interact with it in CLI,
+
+```
+chmod +x build_and_run_engine.sh
+./build_and_run_engine.sh
+```
+
 
 ## 💖 Support This Project
 If you like this project, you can support me:
