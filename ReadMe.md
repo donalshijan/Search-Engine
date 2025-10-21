@@ -112,3 +112,8 @@ chmod +x build_and_run_tests.sh
 ./build_and_run_tests.sh
 ```
 
+## 💖 Support This Project
+If you like this project, you can support me:
+
+- 💸 [PayPal](https://paypal.me/donalshijan)
+- ☕ [Buy Me a Coffee](https://buymeacoffee.com/donalshijan)
